@@ -1,0 +1,17 @@
+# Corpus Sources — Day 1 Sprint
+
+Every source listed here is EXCLUDED from the Day 2 holdout build.
+Format: `<source> — used for: <categories>`
+
+## Sources used
+
+- garak/probes/dan.py (github.com/leondz/garak) — used for: role_hijack, jailbreak (DAN 5/6/7/10/11/12, AIM, EvilBOT, STAN, DUDE, AntiDAN variants)
+- garak/probes/encoding.py (github.com/leondz/garak) — used for: encoded_payload, instruction_override (ROT13, Morse, NATO phonetic, ASCII art, leet-speak, homoglyph, character substitution)
+- Greshake et al. 2023 "Not what you've signed up for" arxiv.org/abs/2302.12173 — used for: instruction_override, exfiltration, multi_turn_setup (indirect injection via search index, documents, tool output, memory poisoning, shared resources, §4.1–4.4)
+- OWASP LLM Top 10 owasp.org/www-project-top-10-for-large-language-model-applications/ — used for: instruction_override, exfiltration, jailbreak (LLM01 prompt injection examples, LLM02 insecure output handling, LLM06 sensitive information disclosure)
+- Perez & Ribeiro 2022 "Ignore Previous Prompt" arxiv.org/abs/2211.09527 — used for: instruction_override, jailbreak (Figure 1 canonical wrap-inject, §3 attack variants: role-prepend, goal-hijack, prompt-leaking)
+- Schulhoff et al. 2023 "Ignore This Title and HackAPrompt" arxiv.org/abs/2311.16119 — used for: jailbreak, instruction_override, multi_turn_setup (§3 taxonomy: compound instruction, context overflow, refusal suppression, cognitive distraction, virtualization, obfuscation, multi-prompt)
+- PromptInject github.com/agencyenterprise/PromptInject — used for: instruction_override, exfiltration, multi_turn_setup (attack templates: goal-hijack, sandwich injection, recursive injection, exfil via tool)
+- Zou et al. 2023 "Universal and Transferable Adversarial Attacks on LLMs" github.com/llm-attacks/llm-attacks — used for: jailbreak (affirmative-prefix elicitation pattern, sure-continuation framing; gradient suffix patterns excluded as non-natural-language)
+- Rehberger (Embrace The Red) 2023 embracethered.com — used for: exfiltration, instruction_override, multi_turn_setup (markdown auto-exfil, Gmail injection, persistent memory poisoning, cross-agent injection, Bing Chat web-page injection, GitHub issue injection; posts pre-2025-01-01 only)
+- Willison 2022-2023 simonwillison.net — used for: instruction_override, exfiltration, encoded_payload, jailbreak (original prompt injection post 2022, delimiter bypass, search-result injection, zero-width char hiding, markdown exfil, Bing/Sydney persona switch; posts pre-2025-01-01 only)
