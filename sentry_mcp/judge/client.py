@@ -16,6 +16,7 @@ import asyncio
 import os
 import time
 
+from .health import JudgeHealth
 from .prompt import (
     SYSTEM_PROMPT,
     TOOL_DESCRIPTION,
@@ -23,7 +24,13 @@ from .prompt import (
     TOOL_SCHEMA,
     build_user_message,
 )
-from .types import JudgeResult, JudgeStatus, Verdict, risk_from_verdict
+from .types import (
+    Disposition,
+    JudgeResult,
+    JudgeStatus,
+    Verdict,
+    risk_from_verdict,
+)
 
 DEFAULT_MODEL = "claude-haiku-4-5"
 DEFAULT_TIMEOUT_S = 15.0
@@ -50,12 +57,14 @@ class AnthropicJudge:
         timeout_s: float = DEFAULT_TIMEOUT_S,
         max_input_chars: int = DEFAULT_MAX_INPUT_CHARS,
         max_tokens: int = DEFAULT_MAX_TOKENS,
+        health: JudgeHealth | None = None,
     ) -> None:
         self._api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
         self.model = model
         self.timeout_s = timeout_s
         self.max_input_chars = max_input_chars
         self.max_tokens = max_tokens
+        self.health = health or JudgeHealth()
         self._client = None
 
     @property
@@ -85,7 +94,11 @@ class AnthropicJudge:
     ) -> JudgeResult:
         """Classify `content`. Never raises; failures come back as a status."""
         if not self.available:
-            return JudgeResult(status=JudgeStatus.UNAVAILABLE, model=self.model)
+            return JudgeResult(
+                status=JudgeStatus.UNAVAILABLE,
+                model=self.model,
+                disposition=Disposition.SYSTEMIC,
+            )
 
         truncated = len(content) > self.max_input_chars
         payload = content[: self.max_input_chars] if truncated else content
@@ -130,11 +143,16 @@ class AnthropicJudge:
     def _failure(
         self, status: JudgeStatus, started: float, truncated: bool
     ) -> JudgeResult:
+        # Classify against history *before* recording, so this failure is
+        # assessed against what came before rather than against itself.
+        disposition = self.health.classify(status)
+        self.health.record(status)
         return JudgeResult(
             status=status,
             model=self.model,
             elapsed_ms=round((time.monotonic() - started) * 1000),
             truncated=truncated,
+            disposition=disposition,
         )
 
     def _parse(self, response, started: float, truncated: bool) -> JudgeResult:
@@ -150,13 +168,9 @@ class AnthropicJudge:
             None,
         )
         if block is None or not isinstance(getattr(block, "input", None), dict):
-            return JudgeResult(
-                status=JudgeStatus.UNPARSEABLE,
-                model=self.model,
-                elapsed_ms=elapsed_ms,
-                truncated=truncated,
-            )
+            return self._failure(JudgeStatus.UNPARSEABLE, started, truncated)
 
+        self.health.record(JudgeStatus.OK)
         return normalise(
             block.input,
             model=self.model,

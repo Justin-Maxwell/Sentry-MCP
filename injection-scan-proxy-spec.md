@@ -240,9 +240,38 @@ the metadata — never an unbounded scan and never a silent pass.
 - Judge call is **optional at runtime**: if no LLM API key is configured,
   Layer 2 is skipped entirely and the heuristic score stands alone. This
   must degrade gracefully, not error out.
-- Judge call failures (timeout, API error, unparseable reply) must not
-  block the response — fall back to the heuristic-only score and note the
-  judge failure in the scan metadata.
+- **Judge failure is a downgrade attack, not a neutral event.** An earlier
+  draft said failures "must not block the response — fall back to the
+  heuristic-only score". That is exploitable: the judge reads
+  attacker-controlled text and does most of the detection work (upstream's own
+  honest figure is 45.2% for the deterministic layers alone against ~99%
+  end-to-end), so content crafted to time the judge out, trip a provider-side
+  refusal, or arrive during an exhausted rate limit buys the attacker that
+  entire gap. Blanket fail-closed is equally wrong — it hands anyone who can
+  disrupt the provider a total denial of service.
+
+  The resolution is that a failure must be **classified, costed, and
+  policy-controlled**, never silently absorbed:
+
+  - **Classify.** A failure on an otherwise-healthy judge is *local* — this
+    page failed while its neighbours did not, which is evidence of targeting.
+    A judge failing broadly is *systemic* — an outage. Too little history is
+    *unknown*. Track a rolling window of recent outcomes to tell them apart;
+    classify against history recorded **before** the current failure.
+  - **Cost.** Every failure caps `coverage` (§5.3): 0 for a local failure,
+    25 for a systemic one or an unconfigured judge. Without this the response
+    carries a low heuristic `risk` beside a high `coverage` that was never
+    earned — the false all-clear §5.1 exists to prevent.
+  - **Control.** `on_judge_failure` (§7) selects `mark` (default: deliver,
+    coverage collapses, loud marker), `block` (refuse the response), or
+    `pass` (metadata note only — the legacy behaviour, retained for
+    operators who want it and named so that choosing it is deliberate).
+
+  A *local* failure on a content-reachable status (timeout, provider error,
+  unparseable reply) is `suspicious_failure`: treat it as evidence in its own
+  right, not as absence of evidence. A missing API key is never
+  content-reachable — it is an operator choice made before any page was
+  fetched — and so is always classified systemic.
 - Note the egress consequence: invoking the judge sends a span of fetched
   page content to a third-party API, off the VPS. Document it; keeping the
   judge unconfigured is a valid privacy posture, not a degraded one.
@@ -444,6 +473,10 @@ from a forged one:
   explaining the block, with `risk` and `coverage` included so the caller
   knows why. Per §5.3, this threshold is the concrete reason `risk` must not
   be inverted.
+- **`on_judge_failure`** — `mark` (default) / `block` / `pass`, per §5.2. This
+  is a separate knob from `block_at_or_above`: one governs what happens when
+  the scanner has an opinion, the other what happens when it was prevented
+  from forming one. Conflating them is how a downgrade attack goes unnoticed.
 - **Image rendering defaults.** Screenshots are downscaled to the standard
   resolution tier before both scanning and delivery (§5.5). The knob exists
   for operators who need more fidelity, but raising delivered fidelity
