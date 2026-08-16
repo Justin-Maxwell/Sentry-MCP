@@ -1,0 +1,47 @@
+# Install:
+#   sudo cp deploy/sentry-mcp.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now sentry-mcp
+#
+# Non-secret config lives in the Environment lines below, matching the Clautana
+# unit's convention. The judge API key does NOT: it comes from an EnvironmentFile
+# outside the repo, because this repo is public and units get committed.
+#
+# EnvironmentFile has no leading dash on purpose. With `-`, a missing or
+# unreadable key file would start the service anyway with no judge configured.
+# The design fails closed (spec §5.2), so it fails closed at the init layer too.
+# systemd reads this file as root before dropping to User=, so 0600 root:root is
+# correct and the service user cannot read it.
+#
+# Python: Debian marks the system interpreter externally-managed (PEP 668), so
+# dependencies live in a venv at /opt/sentry-mcp/.venv rather than system-wide.
+# ExecStart must therefore name the venv interpreter, not /usr/bin/python3.
+
+[Unit]
+Description=Sentry-MCP — fetch-and-scan MCP proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# TODO (spec §3): this shares the Clautana unit's User=justin. That is the
+# weakest part of this file. Playwright drives a real browser against
+# attacker-chosen pages, so a sandbox escape lands as justin and can read this
+# process's /proc/<pid>/environ — the judge key — plus the Clautana state
+# directory and ~/.ssh. A dedicated user plus ProtectHome/PrivateTmp/
+# NoNewPrivileges/ProtectSystem=strict turns that into a contained compromise.
+# Decide before first real traffic, not after.
+User=justin
+
+WorkingDirectory=/opt/sentry-mcp
+EnvironmentFile=/etc/sentry-mcp/judge.env
+Environment=PYTHONUNBUFFERED=1
+Environment=TZ=Pacific/Auckland
+Environment=SENTRY_MCP_PORT=8264
+Environment=SENTRY_MCP_UPSTREAM=http://127.0.0.1:8931
+ExecStart=/opt/sentry-mcp/.venv/bin/python -m sentry_mcp
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
