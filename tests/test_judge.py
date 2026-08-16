@@ -12,7 +12,9 @@ import math
 import pytest
 
 from sentry_mcp.judge import (
+    AnthropicJudge,
     JudgeStatus,
+    JudgeUnavailable,
     Verdict,
     build_user_message,
     normalise,
@@ -75,10 +77,8 @@ def _payload(**overrides):
 
 def test_wellformed_payload_passes_through():
     result = normalise(_payload(verdict="malicious", confidence=0.8))
-    assert result.status is JudgeStatus.OK
     assert result.verdict is Verdict.MALICIOUS
     assert result.risk == 94
-    assert result.usable
 
 
 def test_unknown_verdict_becomes_suspicious_not_clean():
@@ -101,10 +101,14 @@ def test_bad_confidence_defaults_to_one_half(bad):
 
 def test_missing_fields_do_not_raise():
     result = normalise({})
-    assert result.status is JudgeStatus.OK
     assert result.verdict is Verdict.SUSPICIOUS
     assert result.confidence == 0.5
     assert result.patterns == []
+
+
+def test_booleans_are_not_confidences():
+    # bool is a subclass of int; True must not silently become 1.0.
+    assert normalise(_payload(confidence=True)).confidence == 0.5
 
 
 def test_blank_reasoning_gets_a_placeholder():

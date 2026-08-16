@@ -3,11 +3,16 @@
 
 Async, to match the aiohttp deployment idiom of the VPS this shares (§3).
 
-Failure discipline, per §5.2: a timeout, transport error, missing key, or reply
-that does not match the schema is recorded as a *failure* with no risk value.
-It is never reported as a clean verdict, and it never blocks the response — the
-caller falls back to the heuristic score and records the judge failure in scan
-metadata (§6).
+Failure discipline: a timeout, transport error, or reply that does not match
+the schema raises `JudgeUnavailable`. There is no degraded result and no policy
+knob. The judge reads attacker-controlled text and does most of the detection
+work, so any runtime path that delivers content after the judge failed is a
+switch the attacker can flip. If the judge is offline, the proxy is offline.
+
+Absence of an API key is a different thing entirely — a configuration state,
+decided before any page was fetched, and not reachable from page content. It is
+checked once at startup (`require_available`) rather than being discovered
+per-request.
 """
 
 from __future__ import annotations
@@ -16,7 +21,6 @@ import asyncio
 import os
 import time
 
-from .health import JudgeHealth
 from .prompt import (
     SYSTEM_PROMPT,
     TOOL_DESCRIPTION,
@@ -25,9 +29,9 @@ from .prompt import (
     build_user_message,
 )
 from .types import (
-    Disposition,
     JudgeResult,
     JudgeStatus,
+    JudgeUnavailable,
     Verdict,
     risk_from_verdict,
 )
@@ -43,6 +47,12 @@ DEFAULT_MAX_TOKENS = 256
 # the measured flat region, and six times the upstream cap.
 DEFAULT_MAX_INPUT_CHARS = 24_000
 
+# After this many consecutive failures, stop paying the full timeout on every
+# request and fail immediately. This is a latency and cost guard only — the
+# outcome is identical either way, because every failure already refuses the
+# response. It does not decide anything.
+DEFAULT_TRIP_AFTER = 3
+
 
 class AnthropicJudge:
     """Classifies fetched content for injection, one page at a time."""
@@ -57,25 +67,41 @@ class AnthropicJudge:
         timeout_s: float = DEFAULT_TIMEOUT_S,
         max_input_chars: int = DEFAULT_MAX_INPUT_CHARS,
         max_tokens: int = DEFAULT_MAX_TOKENS,
-        health: JudgeHealth | None = None,
+        trip_after: int = DEFAULT_TRIP_AFTER,
     ) -> None:
         self._api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
         self.model = model
         self.timeout_s = timeout_s
         self.max_input_chars = max_input_chars
         self.max_tokens = max_tokens
-        self.health = health or JudgeHealth()
+        self.trip_after = trip_after
+        self._consecutive_failures = 0
         self._client = None
 
     @property
     def available(self) -> bool:
-        """Whether a key is configured.
-
-        When false the whole layer is skipped and the heuristic score stands
-        alone — a supported posture, not a degraded one (§5.2). Keeping the
-        judge unconfigured is also the way to keep page content on the VPS.
-        """
+        """Whether an API key is configured."""
         return bool(self._api_key)
+
+    @property
+    def tripped(self) -> bool:
+        """Whether the fast-fail guard is currently open."""
+        return self._consecutive_failures >= self.trip_after
+
+    def require_available(self) -> None:
+        """Startup check (§5.2).
+
+        Call once, at construction of the proxy. A judge with no key cannot
+        screen anything, and since failure is terminal there is no useful
+        degraded mode to fall into — so this is a refusal to start, not a
+        per-request condition. Discovering it at request time would make every
+        fetch fail for a reason the operator could have been told about at boot.
+        """
+        if not self.available:
+            raise JudgeUnavailable(
+                JudgeStatus.UNAVAILABLE,
+                "no API key configured (set ANTHROPIC_API_KEY)",
+            )
 
     def _get_client(self):
         if self._client is None:
@@ -92,12 +118,18 @@ class AnthropicJudge:
         tool_name: str | None = None,
         tier: int | None = None,
     ) -> JudgeResult:
-        """Classify `content`. Never raises; failures come back as a status."""
-        if not self.available:
-            return JudgeResult(
-                status=JudgeStatus.UNAVAILABLE,
-                model=self.model,
-                disposition=Disposition.SYSTEMIC,
+        """Classify `content`.
+
+        Returns a verdict, or raises `JudgeUnavailable`. There is no third
+        outcome — a caller that does not handle the exception cannot
+        accidentally forward unscreened content.
+        """
+        self.require_available()
+
+        if self.tripped:
+            raise JudgeUnavailable(
+                JudgeStatus.ERROR,
+                f"fast-fail after {self._consecutive_failures} consecutive failures",
             )
 
         truncated = len(content) > self.max_input_chars
@@ -131,32 +163,15 @@ class AnthropicJudge:
                 timeout=self.timeout_s,
             )
         except asyncio.TimeoutError:
-            return self._failure(JudgeStatus.TIMEOUT, started, truncated)
-        except Exception:
+            self._record_failure()
+            raise JudgeUnavailable(
+                JudgeStatus.TIMEOUT, f"no verdict within {self.timeout_s}s"
+            ) from None
+        except Exception as exc:
             # Deliberately broad: a provider outage, a rate limit, a network
-            # blip and an SDK bug are all "no verdict available", and none of
-            # them may take down the fetch they were screening.
-            return self._failure(JudgeStatus.ERROR, started, truncated)
-
-        return self._parse(response, started, truncated)
-
-    def _failure(
-        self, status: JudgeStatus, started: float, truncated: bool
-    ) -> JudgeResult:
-        # Classify against history *before* recording, so this failure is
-        # assessed against what came before rather than against itself.
-        disposition = self.health.classify(status)
-        self.health.record(status)
-        return JudgeResult(
-            status=status,
-            model=self.model,
-            elapsed_ms=round((time.monotonic() - started) * 1000),
-            truncated=truncated,
-            disposition=disposition,
-        )
-
-    def _parse(self, response, started: float, truncated: bool) -> JudgeResult:
-        elapsed_ms = round((time.monotonic() - started) * 1000)
+            # blip and an SDK bug are all "no verdict", and all of them refuse.
+            self._record_failure()
+            raise JudgeUnavailable(JudgeStatus.ERROR, type(exc).__name__) from exc
 
         block = next(
             (
@@ -168,16 +183,22 @@ class AnthropicJudge:
             None,
         )
         if block is None or not isinstance(getattr(block, "input", None), dict):
-            return self._failure(JudgeStatus.UNPARSEABLE, started, truncated)
+            self._record_failure()
+            raise JudgeUnavailable(
+                JudgeStatus.UNPARSEABLE, "no submit_verdict tool_use in reply"
+            )
 
-        self.health.record(JudgeStatus.OK)
+        self._consecutive_failures = 0
         return normalise(
             block.input,
             model=self.model,
-            elapsed_ms=elapsed_ms,
+            elapsed_ms=round((time.monotonic() - started) * 1000),
             truncated=truncated,
             modality=self.modality,
         )
+
+    def _record_failure(self) -> None:
+        self._consecutive_failures += 1
 
 
 def normalise(
@@ -194,7 +215,10 @@ def normalise(
     send anything else. This exists for the case where one does anyway: an
     unrecognised verdict becomes SUSPICIOUS rather than CLEAN, and a missing or
     non-numeric confidence becomes 0.5. Degrading toward caution is the whole
-    point — a malformed reply must never read as an all-clear.
+    point — a malformed field must never read as an all-clear.
+
+    A reply missing the tool call entirely is a different case and never
+    reaches here; that raises `JudgeUnavailable`.
     """
     try:
         verdict = Verdict(str(raw.get("verdict", "")).strip().lower())
@@ -202,13 +226,21 @@ def normalise(
         verdict = Verdict.SUSPICIOUS
 
     confidence_raw = raw.get("confidence")
-    if isinstance(confidence_raw, (int, float)) and confidence_raw == confidence_raw:
+    if (
+        isinstance(confidence_raw, (int, float))
+        and not isinstance(confidence_raw, bool)
+        and confidence_raw == confidence_raw  # excludes NaN
+    ):
         confidence = min(1.0, max(0.0, float(confidence_raw)))
     else:
         confidence = 0.5
 
     reason = raw.get("reasoning")
-    reason = reason.strip() if isinstance(reason, str) and reason.strip() else "no reasoning provided"
+    reason = (
+        reason.strip()
+        if isinstance(reason, str) and reason.strip()
+        else "no reasoning provided"
+    )
 
     patterns_raw = raw.get("detected_patterns")
     patterns = (
@@ -218,7 +250,6 @@ def normalise(
     )
 
     return JudgeResult(
-        status=JudgeStatus.OK,
         verdict=verdict,
         confidence=confidence,
         risk=risk_from_verdict(verdict, confidence),
