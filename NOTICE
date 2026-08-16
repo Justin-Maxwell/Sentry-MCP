@@ -24,8 +24,22 @@ Commit:    66db948b28fc1aa42f52e7297c20b10f682a9065
 Dated:     2026-07-22
 Licence:   MIT
 
-Only the corpus data is incorporated. No VaultMCP source code is included in
-this project; the detection implementation here is original work. The corpus is
+Additionally derived, not copied:
+
+  sentry_mcp/judge/prompt.py    judge taxonomy and the perform-vs-discuss
+                                distinction, rewritten in Python from the
+                                TypeScript JUDGE_SYSTEM_PROMPT and
+                                JUDGE_TOOL_SCHEMA in
+                                packages/proxy/src/detection/clients/types.ts
+
+No VaultMCP source code is copied verbatim into this project. The judge
+implementation is original Python; its classification taxonomy and its central
+distinction between content that *performs* injection and content that merely
+*discusses* it are upstream's contribution, reproduced under the MIT terms below
+and acknowledged here. The data envelope, the risk/coverage mapping, and the
+confidence guidance are original.
+
+The corpus is
 the post-contamination rebuild described in the upstream project's
 POSTMORTEM-2026-05-20-contamination.md: 200 entries drawn from 13 public
 sources, each carrying a mandatory `source` field. Entry provenance is preserved

@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local config — never commit real keys or endpoints
+config.yaml
+.env
+.env.*
+!.env.example
