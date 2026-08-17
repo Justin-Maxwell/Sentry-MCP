@@ -82,6 +82,11 @@ class ScanResult:
     judge: JudgeResult | None
     tier: int = 1
     flagged_spans: list[dict] = field(default_factory=list)
+    # Whether the page fetched is the page asked for. A bot-verification wall
+    # is a successful HTTP exchange returning the wrong document, and scoring
+    # it `clean` is true and useless: the caller wanted the listing, not the
+    # challenge. None means the question was not asked.
+    retrieval: dict | None = None
 
     def metadata(self) -> dict:
         """The §6 envelope, as a plain dict ready to attach to a tool result."""
@@ -117,6 +122,7 @@ class ScanResult:
                         "reason": "layer 1 returned high risk; nothing left to decide",
                     }
                 ),
+                "retrieval": self.retrieval or {"ok": True},
                 "flagged_spans": self.flagged_spans,
                 "excerpt_encoding": {
                     "delimiters": [EXCERPT_OPEN, EXCERPT_CLOSE],

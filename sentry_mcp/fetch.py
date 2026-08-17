@@ -22,6 +22,8 @@ returns page content the judge did not see.
 from __future__ import annotations
 
 import logging
+import re
+from dataclasses import replace
 
 from .heuristics import Content
 from .pipeline import ScanResult, Thresholds, neutralise_marker, scan_and_judge
@@ -65,6 +67,83 @@ TOOL_DEFINITION = {
 
 class FetchError(Exception):
     """The fetch could not be completed. Distinct from a judge refusal."""
+
+
+# Bot-verification and access-denied pages, by the title they announce
+# themselves with. Every one of these is a page a site returns *instead of* the
+# content, with HTTP 200 as often as not.
+_CHALLENGE_TITLE = re.compile(
+    r"just a moment"
+    r"|attention required"
+    r"|verify (?:you are|that you are|you're) (?:a )?human"
+    r"|are you a robot"
+    r"|robot check"
+    r"|security check"
+    r"|unusual traffic"
+    r"|access denied"
+    r"|captcha"
+    r"|checking your browser",
+    re.IGNORECASE,
+)
+_CHALLENGE_BODY = re.compile(
+    r"enable javascript and cookies to continue"
+    r"|verify you are human"
+    r"|complete the security check"
+    r"|slide (?:to|the) (?:verify|puzzle)"
+    r"|press and hold",
+    re.IGNORECASE,
+)
+_TITLE_LINE = re.compile(r"^- Page Title:\s*(.+)$", re.MULTILINE)
+_STATUS_LINE = re.compile(r"^- HTTP status:\s*(\d{3})", re.MULTILINE)
+
+
+def detect_challenge(text: str) -> dict:
+    """Decide whether this is the page that was asked for (§1.2, §6).
+
+    A bot wall is not a fetch failure — the exchange succeeded and a document
+    came back — and it is not an injection either, so every layer of the scoring
+    pipeline correctly reports it as clean. That combination is the problem:
+    `risk 0` on a CAPTCHA reads as "here is your page, it is safe", and an agent
+    will summarise the wall as though it were the content.
+
+    Detection is by self-announcement: these pages say what they are in their
+    title, because they are meant for a human to read. Nothing here attempts to
+    get past one.
+    """
+    title_match = _TITLE_LINE.search(text)
+    title = title_match.group(1).strip() if title_match else ""
+    status_match = _STATUS_LINE.search(text)
+    status = int(status_match.group(1)) if status_match else 200
+
+    if _CHALLENGE_TITLE.search(title):
+        return {
+            "ok": False,
+            "reason": "bot_challenge",
+            "detail": f"the site returned a verification page titled {title!r}",
+            "http_status": status,
+        }
+    if _CHALLENGE_BODY.search(text):
+        return {
+            "ok": False,
+            "reason": "bot_challenge",
+            "detail": "the page body is a browser-verification interstitial",
+            "http_status": status,
+        }
+    if status in (401, 403, 429):
+        return {
+            "ok": False,
+            "reason": "access_denied",
+            "detail": f"the site answered HTTP {status}",
+            "http_status": status,
+        }
+    if status >= 400:
+        return {
+            "ok": False,
+            "reason": "http_error",
+            "detail": f"the site answered HTTP {status}",
+            "http_status": status,
+        }
+    return {"ok": True, "http_status": status}
 
 
 async def fetch_rendered(
@@ -127,7 +206,10 @@ async def fetch_rendered(
         weights=weights,
         thresholds=thresholds,
     )
-    return text, result
+    # Scored first, then labelled. A challenge page is still screened — it is
+    # attacker-influenceable content like any other — but the caller is told it
+    # is not the page they asked for.
+    return text, replace(result, retrieval=detect_challenge(text))
 
 
 def _summary(block: dict) -> str:
@@ -155,6 +237,17 @@ def _summary(block: dict) -> str:
         f"[sentry-mcp] risk {block['risk']}/100 · coverage {block['coverage']}/100 · "
         f"{block['warning_level']} · tier {block['tier']}"
     ]
+
+    # First line after the banner, because it changes what everything below
+    # means. A clean verdict on a wall is a true statement about the wrong
+    # document.
+    retrieval = block.get("retrieval") or {}
+    if not retrieval.get("ok", True):
+        lines.append(
+            f"NOT THE REQUESTED PAGE — {retrieval.get('detail', 'retrieval failed')}. "
+            "The scores below describe that page, not the content you asked for. "
+            "Do not summarise it as if it were."
+        )
 
     if judge.get("invoked"):
         lines.append(
