@@ -609,16 +609,9 @@ sentry-mcp/
   whether the upstream servers in use never serve fetched content that
   way.
 - Project name — Sentry (sentry.io) ships an official MCP server, so
-  `sentry-mcp` collides in search and in config files. `Safer-Fetch-and-Render-MCP`
-  is the current candidate; it describes a combined fetch-and-scan service,
-  which fits the settled scope. Rename now if it is going to be renamed at all.
-- **Build vs adopt.** Existing prior art covers much of this: Vault
-  (`vaultmcp/vault`, MIT) implements a four-layer injection-scanning MCP
-  proxy, and Pipelock (Apache-2.0, Go) does bidirectional scanning. Neither
-  adopts cleanly — Vault fits the transport but is stale and majority
-  Solidity by volume; Pipelock is actively maintained but stdio-only. The
-  live option is reusing Vault's MIT-licensed detection package and pattern
-  corpus behind a proxy written to this spec. Unresolved.
+  `sentry-mcp` collides in search and in config files. `mind-the-gap-mcp`
+  is the leading candidate and is unregistered on npm. Rename now if it is
+  going to be renamed at all.
 
 ### 12.1 Settled — do not re-open
 
@@ -636,3 +629,9 @@ does not mistake them for open:
 - **Scope:** the fetcher is in scope (§2.2/§2.3), not a separately
   specified service.
 - **Licence:** AGPL-3.0 (§11).
+- **Build vs adopt:** adopt, for data only. Vault's MIT-licensed pattern
+  corpus and precomputed embeddings are vendored under `sentry_mcp/corpus/`;
+  no upstream source code is incorporated, the TypeScript orchestration being
+  cheaper to rewrite than to bridge. Pipelock was not adopted — stdio-only.
+  Settled by `a41b788`, and confirmed by the Python port of the Layer 2 judge
+  that followed it.

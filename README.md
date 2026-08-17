@@ -4,9 +4,12 @@ A fetch-and-scan MCP service. Hand it a single URL; get back page content that
 has been rendered, trimmed, and screened for prompt injection before it reaches
 the calling agent.
 
-> **Status: specification only.** No implementation yet. The design lives in
-> [`injection-scan-proxy-spec.md`](injection-scan-proxy-spec.md), which is the
-> authoritative document — this README is orientation, not a substitute.
+> **Status: partial implementation.** The Layer 2 LLM judge (spec §5.2) is
+> built, tested, deployed and round-trip verified on the VPS, and the VaultMCP
+> corpus is vendored. Not yet built: the proxy shell, Layer 1 heuristics, MCP
+> protocol handling, response metadata, and all three fetch tiers. The design
+> lives in [`injection-scan-proxy-spec.md`](injection-scan-proxy-spec.md), which
+> is the authoritative document — this README is orientation, not a substitute.
 
 > **Name is provisional.** `sentry-mcp` collides with Sentry (sentry.io), which
 > ships its own MCP server. `mind-the-gap-mcp` is the leading alternative and is
