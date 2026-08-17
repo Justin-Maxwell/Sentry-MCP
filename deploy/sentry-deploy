@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# Scoped deploy helper for sentry-mcp, invoked through sudo by an operator or
+# an agent working on this repo.
+#
+# Install:
+#   sudo install -o root -g root -m 0755 deploy/sentry-deploy /usr/local/sbin/sentry-deploy
+#   sudo install -o root -g root -m 0440 deploy/sudoers-sentry-mcp /etc/sudoers.d/sentry-mcp
+#   sudo visudo -c
+#
+# WHY A WRAPPER RATHER THAN SUDOERS ENTRIES.
+#
+# A sudoers line like `NOPASSWD: /bin/systemctl restart *` or `NOPASSWD: /bin/cp
+# *` is not a restriction. Wildcards there are escapable into arbitrary root:
+# systemctl can be pointed at a unit the caller wrote, cp can overwrite anything
+# on the filesystem. Fixed verbs with no caller-supplied arguments are the only
+# form that means what it looks like it means.
+#
+# WHAT THIS DELIBERATELY CANNOT DO.
+#
+#   - Read /etc/sentry-mcp/judge.env. The API key stays root:sentry-mcp 0640 and
+#     nothing here cats, copies or echoes it. An agent that can deploy should
+#     still not be able to exfiltrate the credential it deploys alongside.
+#   - Touch CLARA, the tana stack, or any unit other than the two named here.
+#   - Change tailscale serve or funnel configuration. That is the one thing
+#     today proved is easy to break remotely and hard to notice: a `serve`
+#     command silently removed the public Funnel and took the Tana bridge
+#     offline for web and mobile. It stays manual.
+#   - Take arguments of any kind beyond the fixed verb list below.
+#
+# WHAT IT CAN DO, AND WHAT THAT MEANS.
+#
+# `deploy` fast-forwards the repo from origin/main and restarts the service. The
+# code it then runs is whatever was pushed. Scoping the commands does not
+# contain that — what contains it is that every change lands in git first, with
+# a message, where it can be read after the fact. Treat this as "the agent may
+# run reviewed code on this host", because that is what it is.
+
+set -euo pipefail
+
+REPO=/opt/sentry-mcp
+BRANCH=main
+UNITS=(sentry-mcp playwright-mcp)
+
+usage() {
+    cat <<'USAGE'
+Usage: sentry-deploy <verb>
+
+  pull      Fast-forward /opt/sentry-mcp from origin/main
+  units     Install the unit files from the repo and reload systemd
+  deps      Reinstall python dependencies into the service venv
+  restart   Restart sentry-mcp
+  deploy    pull, then restart
+  status    Show unit state, listening ports and the health endpoint
+  logs      Last 40 journal lines for sentry-mcp
+USAGE
+}
+
+git_repo() { git -c safe.directory="$REPO" -C "$REPO" "$@"; }
+
+do_pull() {
+    echo "== pulling $BRANCH"
+    # --ff-only: never create a merge commit on a deployment checkout, and fail
+    # loudly if the host has diverged rather than papering over it.
+    git_repo fetch --quiet origin "$BRANCH"
+    git_repo merge --ff-only "origin/$BRANCH"
+    git_repo log --oneline -1
+}
+
+do_units() {
+    echo "== installing units"
+    for u in "${UNITS[@]}"; do
+        install -o root -g root -m 0644 "$REPO/deploy/$u.service" "/etc/systemd/system/$u.service"
+        echo "   $u.service"
+    done
+    systemctl daemon-reload
+}
+
+do_deps() {
+    echo "== installing dependencies"
+    "$REPO/.venv/bin/pip" install --quiet --editable "$REPO"
+    "$REPO/.venv/bin/python" -c 'import sentry_mcp, aiohttp, anthropic; print("   ok", sentry_mcp.__version__)'
+}
+
+do_restart() {
+    echo "== restarting sentry-mcp"
+    systemctl restart sentry-mcp
+    sleep 1
+    systemctl is-active sentry-mcp
+}
+
+do_status() {
+    for u in "${UNITS[@]}"; do
+        printf '%-16s %s\n' "$u" "$(systemctl is-active "$u")"
+    done
+    echo "== ports"
+    ss -ltn | grep -E '8090|8931' || echo "   neither port is listening"
+    echo "== health"
+    curl -s -m 5 http://127.0.0.1:8090/health || echo "   no answer"
+    echo
+}
+
+case "${1-}" in
+    pull)    do_pull ;;
+    units)   do_units ;;
+    deps)    do_deps ;;
+    restart) do_restart ;;
+    deploy)  do_pull; do_restart ;;
+    status)  do_status ;;
+    logs)    journalctl -u sentry-mcp -n 40 --no-pager ;;
+    *)       usage; exit 2 ;;
+esac

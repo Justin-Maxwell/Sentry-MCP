@@ -1,0 +1,22 @@
+# Scoped deploy rights for sentry-mcp.
+#
+# Install:
+#   sudo install -o root -g root -m 0440 deploy/sudoers-sentry-mcp /etc/sudoers.d/sentry-mcp
+#   sudo visudo -c
+#
+# The path is absolute and takes no wildcard. /usr/local/sbin/sentry-deploy must
+# be owned by root and not writable by justin — otherwise this grants full root,
+# since the caller could rewrite the script it is permitted to run. Check with:
+#
+#   stat -c '%U:%G %a' /usr/local/sbin/sentry-deploy     # expect root:root 755
+#
+# There is no NOPASSWD entry for cp, systemctl, pip or git here on purpose.
+# Each of those with a wildcard is escapable into arbitrary root.
+
+justin ALL=(root) NOPASSWD: /usr/local/sbin/sentry-deploy pull, \
+                            /usr/local/sbin/sentry-deploy units, \
+                            /usr/local/sbin/sentry-deploy deps, \
+                            /usr/local/sbin/sentry-deploy restart, \
+                            /usr/local/sbin/sentry-deploy deploy, \
+                            /usr/local/sbin/sentry-deploy status, \
+                            /usr/local/sbin/sentry-deploy logs
