@@ -92,6 +92,17 @@ class UpstreamMCP:
                 if session_id:
                     self._session_id = session_id
                 content_type = response.headers.get("Content-Type", "")
+
+                if response.status < 400 and "text/event-stream" in content_type.lower():
+                    # Read the stream rather than the body. An earlier version
+                    # called .read() and parsed the result whole, which works
+                    # only when the whole answer is already there. Playwright
+                    # streams a slow navigation — keepalives and progress first,
+                    # the result when it has one — so a heavy page produced a
+                    # body with no JSON-RPC data in it and the fetch failed on
+                    # precisely the pages worth fetching.
+                    return await self._read_stream(response, payload["id"], method)
+
                 body = await response.read()
                 if response.status >= 400:
                     detail = body[:120].decode("utf-8", "replace").strip()
@@ -117,6 +128,55 @@ class UpstreamMCP:
                 code=err.get("code"),
             )
         return envelope.get("result")
+
+    async def _read_stream(self, response, request_id: int, method: str) -> Any:
+        """Consume an event stream until the answer to `request_id` arrives.
+
+        Returns as soon as a matching envelope appears, so a fetch is not held
+        open for whatever the server sends afterwards. Keepalives, comments and
+        progress events are skipped rather than treated as content.
+
+        The overall deadline is the session timeout; this loop adds no second
+        one, because two timeouts on one operation is how a request ends up
+        failing for a reason neither of them names.
+        """
+        last: dict | None = None
+        while True:
+            raw = await response.content.readline()
+            if not raw:  # stream closed
+                break
+            line = raw.decode("utf-8", "replace").strip()
+            if not line or not line.startswith("data:"):
+                continue
+            chunk = line[len("data:") :].strip()
+            if not chunk:
+                continue
+            try:
+                parsed = json.loads(chunk)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(parsed, dict):
+                continue
+            if "error" in parsed or "result" in parsed:
+                last = parsed
+                if parsed.get("id") == request_id:
+                    if "error" in parsed:
+                        err = parsed["error"] or {}
+                        raise UpstreamError(
+                            f"upstream error on {method}: "
+                            f"{err.get('message', 'no message')}",
+                            code=err.get("code"),
+                        )
+                    return parsed.get("result")
+
+        if last is not None:
+            # Answered without echoing our id; only one request is in flight
+            # per call here, so this is still our answer.
+            return last.get("result")
+
+        raise UpstreamError(
+            f"upstream closed the event stream for {method} without answering"
+        )
 
     async def initialize(self) -> dict:
         """Complete the handshake. Idempotent — safe to call per request."""

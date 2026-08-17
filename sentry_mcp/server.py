@@ -122,7 +122,11 @@ class Config:
     # auth failure and is not one. Confirmed against 1.63.0-alpha, 2026-08-17.
     upstream: str = "http://localhost:8931"
     upstream_path: str = "/mcp"
-    upstream_timeout_s: float = 30.0
+    # 30s was too short once the browser became headful and real. A heavy
+    # commercial listing can spend that long alone on navigation, and a human
+    # answering a verification page spends longer still. The judge keeps its own
+    # 15s deadline; this one bounds the browser.
+    upstream_timeout_s: float = 180.0
     # §4.2: these names are the spec's illustrative guesses and must be checked
     # against a live Playwright MCP. Configurable so a rename is a config edit.
     navigate_tool: str = "browser_navigate"
