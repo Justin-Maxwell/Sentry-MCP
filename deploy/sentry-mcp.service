@@ -45,7 +45,10 @@ WorkingDirectory=/opt/sentry-mcp
 EnvironmentFile=/etc/sentry-mcp/judge.env
 Environment=PYTHONUNBUFFERED=1
 Environment=TZ=Pacific/Auckland
-Environment=SENTRY_MCP_PORT=8264
+# 8090, not 8264. 8262 is Tana Outliner and 8263 is CLARA; numbering this
+# service into that block would imply it belongs to the Tana stack, which is the
+# association the separate user and separate trust boundary exist to break.
+Environment=SENTRY_MCP_PORT=8090
 # localhost, not 127.0.0.1: Playwright MCP's DNS-rebinding guard matches the
 # Host header literally and 403s anything else with "Access is only allowed at
 # localhost:8931". Confirmed against 1.63.0-alpha on 2026-08-17.

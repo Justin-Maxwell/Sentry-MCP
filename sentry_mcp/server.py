@@ -79,7 +79,13 @@ class Config:
     """
 
     host: str = "127.0.0.1"
-    port: int = 8264
+    # 8090, deliberately not 8264. Port adjacency reads as documentation: 8262
+    # is Tana Outliner and 8263 is CLARA, so a number in that block claims this
+    # is a third member of the Tana stack. It is not — it runs a browser against
+    # hostile pages under its own user, and the numbering should say so. 8090 is
+    # unassigned in /etc/services, unlike 8088 (OmniORB, and the Hadoop YARN
+    # default).
+    port: int = 8090
     # `localhost`, not `127.0.0.1`. Playwright MCP enforces a DNS-rebinding
     # guard that matches the Host header literally and answers anything else
     # with "Access is only allowed at localhost:8931" — a 403 that looks like an
@@ -104,7 +110,7 @@ class Config:
 
         Names match `deploy/sentry-mcp.service` exactly. A malformed numeric
         value raises rather than falling back to the default — a port typo that
-        silently starts the service on 8264 anyway is worse than a refusal,
+        silently starts the service on 8090 anyway is worse than a refusal,
         because the operator is then debugging a Funnel route that was never
         wrong.
         """

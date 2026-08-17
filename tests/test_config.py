@@ -16,7 +16,8 @@ from sentry_mcp.server import Config
 def test_defaults_match_the_deploy_unit():
     # deploy/sentry-mcp.service pins these; a drift here is a drift there.
     cfg = Config()
-    assert cfg.port == 8264
+    # Deliberately outside the 826x block that Tana Outliner and CLARA occupy.
+    assert cfg.port == 8090
     # localhost, not 127.0.0.1. Playwright MCP's DNS-rebinding guard matches the
     # Host header literally and 403s the dotted form.
     assert cfg.upstream == "http://localhost:8931"
@@ -36,12 +37,12 @@ def test_env_overrides_are_applied():
 def test_empty_env_falls_back_to_defaults():
     # systemd writes Environment=FOO= as an empty string, not an absent key.
     cfg = Config.from_env({"SENTRY_MCP_PORT": "", "SENTRY_MCP_HOST": ""})
-    assert cfg.port == 8264
+    assert cfg.port == 8090
     assert cfg.host == "127.0.0.1"
 
 
 def test_malformed_port_refuses_rather_than_defaulting():
-    # Silently starting on 8264 after a typo sends the operator to debug a
+    # Silently starting on 8090 after a typo sends the operator to debug a
     # Funnel route that was never wrong.
     with pytest.raises(ValueError, match="SENTRY_MCP_PORT"):
         Config.from_env({"SENTRY_MCP_PORT": "82 64"})
