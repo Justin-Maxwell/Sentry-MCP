@@ -30,8 +30,13 @@
 # at exactly the data this proxy exists to protect. 1200 belongs to a host
 # account that owns nothing:
 #
-#   sudo useradd --system --uid 1200 --no-create-home \
+#   sudo useradd --uid 1200 --no-create-home \
 #        --shell /usr/sbin/nologin sentry-browser
+#
+# --system is deliberately absent. It only selects a uid from the 100-999 range,
+# which an explicit --uid overrides anyway, so passing both earns a SYS_UID_MAX
+# warning and buys nothing. The account is a system account by construction:
+# nologin shell, no home, no files, no group members.
 #
 # HOME is redirected to the tmpfs because /home/pwuser inside the image belongs
 # to uid 1001 and is not writable by 1200.
