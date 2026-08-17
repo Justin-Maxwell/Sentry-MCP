@@ -2,36 +2,44 @@
 #   sudo cp deploy/sentry-mcp.service /etc/systemd/system/
 #   sudo systemctl daemon-reload && sudo systemctl enable --now sentry-mcp
 #
-# Non-secret config lives in the Environment lines below, matching the Clautana
-# unit's convention. The judge API key does NOT: it comes from an EnvironmentFile
-# outside the repo, because this repo is public and units get committed.
+# Non-secret config lives in the Environment lines below. The judge API key does
+# NOT: it comes from an EnvironmentFile outside the repo, because this repo is
+# public and units get committed.
 #
 # EnvironmentFile has no leading dash on purpose. With `-`, a missing or
 # unreadable key file would start the service anyway with no judge configured.
 # The design fails closed (spec §5.2), so it fails closed at the init layer too.
-# systemd reads this file as root before dropping to User=, so 0600 root:root is
-# correct and the service user cannot read it.
 #
 # Python: Debian marks the system interpreter externally-managed (PEP 668), so
 # dependencies live in a venv at /opt/sentry-mcp/.venv rather than system-wide.
 # ExecStart must therefore name the venv interpreter, not /usr/bin/python3.
+#
+# TRUST BOUNDARY (spec §3). This process holds the judge API key. It must not
+# share a user with the browser, which executes attacker-chosen JavaScript: a
+# sandbox escape under a shared user reads this process's /proc/<pid>/environ
+# and walks off with the key. The browser runs in a container as its own user
+# (deploy/playwright-mcp.service); this runs as sentry-mcp and owns no browser.
+#
+# One-time setup:
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin sentry-mcp
+#   sudo chown -R root:root /opt/sentry-mcp          # read-only to the service
+#   sudo chown root:sentry-mcp /etc/sentry-mcp/judge.env
+#   sudo chmod 0640 /etc/sentry-mcp/judge.env
 
 [Unit]
 Description=Sentry-MCP — fetch-and-scan MCP proxy
-After=network-online.target
+Documentation=https://github.com/Justin-Maxwell/Sentry-MCP
+After=network-online.target playwright-mcp.service
 Wants=network-online.target
+# Not Requires=: the proxy should start and report its upstream unreachable
+# rather than refuse to exist because the browser is down. Judge failure is the
+# only thing that takes it offline (§5.2).
+After=playwright-mcp.service
 
 [Service]
 Type=simple
-
-# TODO (spec §3): this shares the Clautana unit's User=justin. That is the
-# weakest part of this file. Playwright drives a real browser against
-# attacker-chosen pages, so a sandbox escape lands as justin and can read this
-# process's /proc/<pid>/environ — the judge key — plus the Clautana state
-# directory and ~/.ssh. A dedicated user plus ProtectHome/PrivateTmp/
-# NoNewPrivileges/ProtectSystem=strict turns that into a contained compromise.
-# Decide before first real traffic, not after.
-User=justin
+User=sentry-mcp
+Group=sentry-mcp
 
 WorkingDirectory=/opt/sentry-mcp
 EnvironmentFile=/etc/sentry-mcp/judge.env
@@ -42,6 +50,41 @@ Environment=SENTRY_MCP_UPSTREAM=http://127.0.0.1:8931
 ExecStart=/opt/sentry-mcp/.venv/bin/python -m sentry_mcp
 Restart=on-failure
 RestartSec=5
+
+# Hardening. The threat this answers is not this process misbehaving — it is
+# this process being the one that holds a credential on a box that also runs a
+# browser against hostile pages.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+UMask=0077
+
+# ProtectProc=invisible is the directive that specifically closes the
+# /proc/<pid>/environ read described above, even for a process that somehow ends
+# up running as this user.
+
+# MemoryDenyWriteExecute is deliberately NOT set. CPython is fine without it,
+# but a wheel that JITs would fail at import with an error that looks nothing
+# like the cause. If you want it, add it and test a real fetch before enabling.
 
 [Install]
 WantedBy=multi-user.target

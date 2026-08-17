@@ -1,0 +1,69 @@
+# Playwright MCP — the upstream fetch/render server (spec §2.3).
+#
+# Install:
+#   sudo cp deploy/playwright-mcp.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now playwright-mcp
+#
+# WHY A CONTAINER, ON A HOST THAT OTHERWISE USES PLAIN SYSTEMD.
+#
+# This is the one component that executes attacker-chosen code. Every page the
+# proxy fetches runs its own JavaScript in this browser, by design — that is
+# tier 1 of the capability ladder (§1.2), not an accident. A dedicated system
+# user would isolate it from the judge key but would still share the host's
+# filesystem and kernel surface. A container adds namespaces, seccomp and a
+# read-only rootfs for the price of one package, and §2.3 already specifies the
+# Docker image, so this follows the spec rather than the house idiom.
+#
+# The house idiom is still honoured where it counts: this is a systemd unit with
+# systemd's lifecycle, not a compose file with its own opinions about restarts.
+#
+# BINDING. The published port is 127.0.0.1 only. Nothing about this server
+# should be reachable from the tailnet, let alone the Funnel — the proxy is the
+# only client, and it is on this host. A 0.0.0.0 bind here would expose an
+# unauthenticated browser-automation API to the tailnet.
+
+[Unit]
+Description=Playwright MCP — headless browser for Sentry-MCP
+Documentation=https://github.com/microsoft/playwright-mcp
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=5
+
+# --rm so a crash does not leave a stopped container that blocks the next start.
+# --user 1001 keeps the browser off root inside the container as well as out.
+# --init reaps the zombie processes a browser leaves behind.
+# --shm-size: Chromium's default 64MB /dev/shm causes tab crashes on real pages.
+# --security-opt no-new-privileges mirrors the proxy unit's NoNewPrivileges.
+ExecStartPre=-/usr/bin/docker rm -f playwright-mcp
+ExecStart=/usr/bin/docker run --rm --name playwright-mcp \
+    --init \
+    --user 1001 \
+    --shm-size=1g \
+    --security-opt no-new-privileges \
+    --cap-drop ALL \
+    --read-only \
+    --tmpfs /tmp:rw,noexec,nosuid,size=256m \
+    --publish 127.0.0.1:8931:8931 \
+    mcr.microsoft.com/playwright/mcp \
+    --host 0.0.0.0 --port 8931 \
+    --headless \
+    --isolated \
+    --block-service-workers
+ExecStop=/usr/bin/docker stop playwright-mcp
+
+# --isolated keeps no profile between sessions, so one fetched page cannot leave
+# cookies or storage for the next. --block-service-workers stops a page
+# installing a worker that outlives the navigation (§2.3).
+#
+# NOT SET, deliberately: --user-agent. §2.3 lists it as bot-detection
+# mitigation, and it is the AliExpress-class question. Setting a UA to defeat
+# detection is a different activity from fetching a page a user named; decide it
+# explicitly rather than inheriting it from a unit file.
+
+[Install]
+WantedBy=multi-user.target
