@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sentry-mcp"
+version = "0.1.0"
+description = "A fetch-and-scan MCP service: render a URL, screen it for prompt injection, then hand it to the agent."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE", "NOTICE"]
+
+# aiohttp serves the front door and dials the upstream; anthropic backs the
+# Layer 2 judge (§5.2). Both were installed by hand into the VPS venv before
+# this file existed, which is why it exists — a deployment whose dependency set
+# lives only in one machine's site-packages cannot be rebuilt.
+dependencies = [
+    "aiohttp>=3.9",
+    "anthropic>=0.40",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+sentry-mcp = "sentry_mcp.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["sentry_mcp*"]
+
+[tool.setuptools.package-data]
+# The vendored corpus is data the judge and heuristics both read at runtime, so
+# it must survive packaging. It is not incidental to the source tree.
+"sentry_mcp.corpus" = ["*.json", "*.bin", "*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

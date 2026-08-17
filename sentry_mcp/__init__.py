@@ -4,4 +4,6 @@
 See injection-scan-proxy-spec.md for the design this implements.
 """
 
-__all__ = ["judge"]
+__version__ = "0.1.0"
+
+__all__ = ["__version__", "judge"]
