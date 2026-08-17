@@ -469,6 +469,16 @@ async def _handle_tools_call(request: web.Request, envelope: dict) -> web.Respon
             "Page content is never delivered unscreened.",
         )
     except FetchError as exc:
+        # Logged, not merely returned. A fetch that fails leaves no other trace:
+        # the success path logs the URL and its scores, and a judge failure logs
+        # its own warning, so without this a failed fetch is invisible to the
+        # operator while being perfectly legible to the caller. That asymmetry
+        # cost a diagnosis once already.
+        log.warning(
+            "fetch failed for %s — %s",
+            (params.get("arguments") or {}).get("url"),
+            exc,
+        )
         return _rpc_error(request_id, FETCH_FAILED, str(exc))
 
     log.info(
