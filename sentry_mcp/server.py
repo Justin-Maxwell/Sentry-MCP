@@ -68,6 +68,34 @@ KEY_THRESHOLDS = web.AppKey("thresholds", Thresholds)
 _FORWARDED_REQUEST_HEADERS = ("content-type", "accept", "mcp-session-id", "mcp-protocol-version")
 _FORWARDED_RESPONSE_HEADERS = ("content-type", "mcp-session-id")
 
+# Upstream tools that are never advertised and never forwarded, even when
+# SENTRY_MCP_EXPOSE_UPSTREAM_TOOLS is deliberately switched on.
+#
+# Enumerated from a live Playwright MCP 1.63.0-alpha on 2026-08-17, which
+# advertises 24 tools. The escape hatch exists so an operator can drive the
+# browser directly; it does not exist to hand out primitives whose blast radius
+# is the host rather than the page:
+#
+#   browser_run_code_unsafe   arbitrary code execution, so named upstream
+#   browser_evaluate          arbitrary JavaScript in page context
+#   browser_network_request   arbitrary requests originating inside the VPS —
+#                             including http://localhost:8262, which is Tana
+#   browser_file_upload       reads paths from the container filesystem
+#
+# A denylist rather than an allowlist because the upstream adds tools between
+# releases, and a new one should arrive hidden by a config flag rather than
+# exposed by an omission. browser_evaluate is here despite §5.1 wanting it for a
+# raw-HTML second view: the proxy may call it internally, which is a different
+# thing from advertising it to callers.
+NEVER_EXPOSE = frozenset(
+    {
+        "browser_run_code_unsafe",
+        "browser_evaluate",
+        "browser_network_request",
+        "browser_file_upload",
+    }
+)
+
 
 @dataclass(frozen=True)
 class Config:
@@ -201,7 +229,11 @@ async def handle_health(request: web.Request) -> web.Response:
                 "3": "rendered page image (spec section 5.5)",
             },
             "upstream_tools_exposed": cfg.expose_upstream_tools,
-            "upstream_tool_names_verified": False,
+            # Report the configured names rather than a verification boolean the
+            # running process cannot substantiate. Confirmation is a deployment
+            # step: scripts/verify_upstream.py, which exits non-zero on a miss.
+            "upstream_tools": [cfg.navigate_tool, cfg.snapshot_tool],
+            "never_exposed": sorted(NEVER_EXPOSE),
             "block_at_or_above": thresholds.block_at_or_above,
         }
     )
@@ -246,8 +278,11 @@ async def _handle_tools_list(request: web.Request, envelope: dict) -> web.Respon
     if cfg.expose_upstream_tools:
         try:
             # Any upstream tool that is exposed must carry its upstream schema
-            # unaltered (§4.1), so these are relayed verbatim.
-            tools.extend(await upstream.list_tools())
+            # unaltered (§4.1), so these are relayed verbatim — minus the ones
+            # whose blast radius is the host rather than the page.
+            tools.extend(
+                t for t in await upstream.list_tools() if t.get("name") not in NEVER_EXPOSE
+            )
         except UpstreamError as exc:
             return _rpc_error(envelope.get("id"), UPSTREAM_UNAVAILABLE, str(exc))
 
@@ -261,6 +296,16 @@ async def _handle_tools_call(request: web.Request, envelope: dict) -> web.Respon
     params = envelope.get("params") or {}
     name = params.get("name")
     request_id = envelope.get("id")
+
+    if name in NEVER_EXPOSE:
+        # Advertising is not the only route to a tool: a caller can name one it
+        # was never shown. Refused at the call site as well as the listing.
+        return _rpc_error(
+            request_id,
+            TOOL_HIDDEN,
+            f"tool {name!r} is never proxied: its reach is the host rather than "
+            "the fetched page",
+        )
 
     if name != TOOL_NAME:
         if not cfg.expose_upstream_tools:
