@@ -118,6 +118,10 @@ async def _exercise(judge, request_body, *, expose: bool = False, page=PAGE_TEXT
             async with session.post(
                 f"http://127.0.0.1:{proxy_port}/mcp", data=json.dumps(request_body)
             ) as resp:
+                # A notification is answered 202 with no body, so JSON decoding
+                # is not always the right question to ask.
+                if resp.content_type != "application/json":
+                    return None, calls
                 return await resp.json(), calls
     finally:
         await proxy_runner.cleanup()
@@ -214,5 +218,7 @@ def test_batched_tool_calls_are_refused_plainly():
 
 
 def test_unknown_method_still_proxies_to_upstream():
-    body, _ = run(StubJudge(), {"jsonrpc": "2.0", "id": 9, "method": "ping"})
+    # Genuinely unowned: initialize, ping, notifications and the tools/* pair
+    # are all answered locally now.
+    body, _ = run(StubJudge(), {"jsonrpc": "2.0", "id": 9, "method": "resources/list"})
     assert body["error"]["code"] == -32601
