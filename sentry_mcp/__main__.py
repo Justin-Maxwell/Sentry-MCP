@@ -59,9 +59,19 @@ def main(argv: list[str] | None = None) -> int:
         config.upstream_url,
         judge.model,
     )
+    # This line said "scanning is NOT active" until 2026-08-17, long after the
+    # pipeline was wired in. It contradicted /health in the same boot, which is
+    # the worst kind of stale log: one that reassures or alarms wrongly about
+    # the single property an operator checks.
+    log.info(
+        "scanning active — layer 1 heuristics, then %s on every delivered "
+        "response; tier 1 only, no boilerplate removal and no image scanning",
+        judge.model,
+    )
     log.warning(
-        "scanning is NOT active: the scoring pipeline (spec section 5) is not "
-        "implemented, so tools/call is refused rather than forwarded"
+        "judge egress: fetched page content is sent to the Anthropic API on "
+        "every delivered response (spec section 5.2). Running this proxy means "
+        "accepting that. A judge failure refuses the response outright."
     )
 
     web.run_app(app, host=config.host, port=config.port, print=None)
