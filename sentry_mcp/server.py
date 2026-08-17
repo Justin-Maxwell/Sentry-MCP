@@ -29,6 +29,7 @@ handshake but not for long-lived sessions. Flagged rather than hidden.
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 from dataclasses import dataclass
@@ -128,6 +129,16 @@ class Config:
     # Off by default. See the module docstring for why this is a safety switch.
     expose_upstream_tools: bool = False
 
+    # Shared secret required on /mcp. None disables the check, which is correct
+    # while the listener is bound to 127.0.0.1 and unreachable from anywhere
+    # else, and wrong the moment it is published through the tunnel.
+    #
+    # Header-borne, never query-borne. A token in a query string is written to
+    # the access log on every request and stays there; a header is not. The
+    # tunnel-side secret path is stripped by Tailscale before the request
+    # arrives, so that one never reaches this process's log either.
+    token: str | None = None
+
     @property
     def upstream_url(self) -> str:
         return f"{self.upstream.rstrip('/')}{self.upstream_path}"
@@ -169,6 +180,7 @@ class Config:
             navigate_tool=env.get("SENTRY_MCP_NAVIGATE_TOOL") or defaults.navigate_tool,
             snapshot_tool=env.get("SENTRY_MCP_SNAPSHOT_TOOL") or defaults.snapshot_tool,
             expose_upstream_tools=expose in {"1", "true", "yes", "on"},
+            token=(env.get("SENTRY_MCP_TOKEN") or "").strip() or None,
         )
 
 
@@ -234,13 +246,46 @@ async def handle_health(request: web.Request) -> web.Response:
             # step: scripts/verify_upstream.py, which exits non-zero on a miss.
             "upstream_tools": [cfg.navigate_tool, cfg.snapshot_tool],
             "never_exposed": sorted(NEVER_EXPOSE),
+            # Whether, not what. An operator needs to know the door is locked;
+            # nobody needs the key echoed back by an unauthenticated endpoint.
+            "auth_required": bool(cfg.token),
             "block_at_or_above": thresholds.block_at_or_above,
         }
     )
 
 
+def _authorised(request: web.Request) -> bool:
+    """Constant-time check of the shared secret, if one is configured.
+
+    Accepts `Authorization: Bearer <token>` or `X-Sentry-Token: <token>`.
+    Deliberately does not accept a query parameter: that would be logged.
+    """
+    cfg = request.app[KEY_CONFIG]
+    if not cfg.token:
+        return True
+
+    presented = ""
+    auth = request.headers.get("Authorization", "")
+    if auth.lower().startswith("bearer "):
+        presented = auth[7:].strip()
+    if not presented:
+        presented = request.headers.get("X-Sentry-Token", "").strip()
+
+    return bool(presented) and hmac.compare_digest(presented, cfg.token)
+
+
 async def handle_mcp(request: web.Request) -> web.Response:
     cfg = request.app[KEY_CONFIG]
+
+    if not _authorised(request):
+        # 404, not 401, and on purpose. A 401 tells claude.ai this is an
+        # OAuth-protected resource, sending it into discovery against
+        # /.well-known paths this server does not serve, and the connection
+        # fails with an authorization error that describes nothing true. A 404
+        # also declines to confirm that anything is here.
+        log.warning("rejected unauthenticated request from %s", request.remote)
+        return web.Response(status=404, text="not found")
+
     raw = await request.read()
 
     try:
