@@ -21,6 +21,20 @@
 # should be reachable from the tailnet, let alone the Funnel — the proxy is the
 # only client, and it is on this host. A 0.0.0.0 bind here would expose an
 # unauthenticated browser-automation API to the tailnet.
+#
+# UID 1200 IS NOT ARBITRARY. Docker maps a container uid straight onto the host
+# uid unless userns-remap is configured, and it is not configured here. The
+# Playwright image's own user is 1001 — which on this host is `tana`, the
+# account running Tana Outliner and the entire knowledge base. Running the
+# browser as the image default would therefore have pointed a container escape
+# at exactly the data this proxy exists to protect. 1200 belongs to a host
+# account that owns nothing:
+#
+#   sudo useradd --system --uid 1200 --no-create-home \
+#        --shell /usr/sbin/nologin sentry-browser
+#
+# HOME is redirected to the tmpfs because /home/pwuser inside the image belongs
+# to uid 1001 and is not writable by 1200.
 
 [Unit]
 Description=Playwright MCP — headless browser for Sentry-MCP
@@ -35,19 +49,20 @@ Restart=on-failure
 RestartSec=5
 
 # --rm so a crash does not leave a stopped container that blocks the next start.
-# --user 1001 keeps the browser off root inside the container as well as out.
+# --user 1200 maps to host `sentry-browser`, which owns nothing. See above.
 # --init reaps the zombie processes a browser leaves behind.
 # --shm-size: Chromium's default 64MB /dev/shm causes tab crashes on real pages.
 # --security-opt no-new-privileges mirrors the proxy unit's NoNewPrivileges.
 ExecStartPre=-/usr/bin/docker rm -f playwright-mcp
 ExecStart=/usr/bin/docker run --rm --name playwright-mcp \
     --init \
-    --user 1001 \
+    --user 1200 \
+    --env HOME=/tmp \
     --shm-size=1g \
     --security-opt no-new-privileges \
     --cap-drop ALL \
     --read-only \
-    --tmpfs /tmp:rw,noexec,nosuid,size=256m \
+    --tmpfs /tmp:rw,nosuid,size=512m \
     --publish 127.0.0.1:8931:8931 \
     mcr.microsoft.com/playwright/mcp \
     --host 0.0.0.0 --port 8931 \
