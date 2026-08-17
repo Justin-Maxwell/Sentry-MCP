@@ -104,14 +104,28 @@ Relevant flags: `--user-agent` (bot-detection mitigation), `--extension`
     if the VPS's existing convention allows this without disproportionate
     effort. Flag as a TODO if the existing setup makes this awkward — don't
     block the spec on it.
-- **Same Tailscale node** as Clautana (no new tunnel infrastructure), but:
-  - Own local port.
-  - Own path on the existing Funnel, e.g. `https://<node>.<tailnet>.ts.net/scan`
-    routing to the new local port, alongside the existing `/mcp` path to
-    Clautana. Confirm the exact Funnel path-routing syntax against the
-    Tailscale Funnel docs at implementation time — don't assume it matches
-    the `serve`/`funnel` config already in use for Clautana without
-    checking the current config file.
+- **Own tailnet hostname**, not a shared one. Own local port too, but that is
+  not the part that matters.
+
+  An earlier version of this section said "own path on the existing Funnel".
+  That is not achievable, and neither is own port. **OAuth discovery is
+  origin-scoped, and a client falls back to the port-less origin** when a
+  resource's own origin publishes no metadata. Measured 2026-08-17: for a
+  resource at `https://clautana.<tailnet>.ts.net:8443/mcp`, claude.ai probed
+  that origin (this proxy, 404) and `https://clautana.<tailnet>.ts.net`
+  (CLARA, 200) *in the same second*, then tried to register an OAuth client
+  against Tana's authorization server for a resource Tana knows nothing about.
+
+  CLARA's protected-resource metadata names `resource: https://clautana.<tailnet>.ts.net`
+  — the whole host — so **every path and every port on that hostname inherits
+  its OAuth requirement.** Two MCP servers cannot share an origin when either
+  one advertises OAuth.
+
+  The fix is a second `tailscaled` device on the same VPS with its own state
+  directory and control socket, giving `https://mind-the-gap.<tailnet>.ts.net`
+  and its own discovery namespace. See `deploy/tailscaled-mindthegap.service`.
+  Editing CLARA's metadata was rejected: it would risk a working Tana bridge to
+  fix a new one.
 - Config file (`.env` or `config.yaml`, match whatever convention
   `tana_proxy.py` already uses) holds: upstream MCP server URL, local
   listen port, LLM-judge API key (optional), threshold values (§7),
@@ -654,8 +668,9 @@ does not mistake them for open:
   agent points at the scanner, scanner calls upstream.
 - **Scoring:** heuristics plus optional LLM-judge escalation.
 - **Deployment:** isolated, but sharing the existing tunnel.
-- **Exposure:** same Tailscale node, separate local port, separate Funnel
-  path (`/scan` vs Clautana's `/mcp`).
+- **Exposure:** own tailnet hostname on a second `tailscaled` device, own local
+  port, own Funnel. Confirmed working 2026-08-17 after the shared-path and
+  shared-port forms both failed on origin-scoped OAuth discovery (§3).
 - **Transport:** HTTP in from the agent, **HTTP** out to Playwright MCP on
   port 8931 — *not* stdio, which an earlier draft of §4.1 assumed.
 - **Scope:** the fetcher is in scope (§2.2/§2.3), not a separately

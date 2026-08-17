@@ -336,6 +336,22 @@ async def handle_mcp(request: web.Request) -> web.Response:
     if methods == {"tools/call"}:
         return await _handle_tools_call(request, envelopes[0])
 
+    if not cfg.expose_upstream_tools:
+        # Nothing else belongs upstream. This server advertises `tools` and
+        # nothing else, so a probe for resources/ or prompts/ gets a proper
+        # method-not-found from the server that declined to offer them.
+        #
+        # Forwarding them was worse than untidy: the client's request reached a
+        # component it never addressed, and Playwright's 400 came back wearing
+        # this server's identity. Observed during the first successful
+        # connector handshake, which contained two such 400s.
+        return _rpc_error(
+            _first_id(envelopes),
+            METHOD_NOT_FOUND,
+            f"method {sorted(m for m in methods if m)!r} is not supported; "
+            "this server offers tools only",
+        )
+
     return await _forward(request, raw, envelopes)
 
 
@@ -520,12 +536,28 @@ async def redacted_access_log(request: web.Request, handler):
     record and removes the secret.
     """
     safe = _TOKEN_IN_PATH.sub("/t/<redacted>", request.path_qs)
+    # The JSON-RPC method, when there is one. Without it a log of POSTs to one
+    # path says nothing about what was asked — which is how two 400s sat
+    # unexplained in an otherwise successful handshake.
+    method = ""
+    if request.method == "POST" and request.can_read_body:
+        try:
+            body = await request.json()
+            names = (
+                {e.get("method") for e in body if isinstance(e, dict)}
+                if isinstance(body, list)
+                else {body.get("method")} if isinstance(body, dict) else set()
+            )
+            method = " " + ",".join(sorted(n for n in names if n))
+        except Exception:  # noqa: BLE001 — logging must never break a request
+            method = " <unparseable>"
+
     try:
         response = await handler(request)
     except web.HTTPException as exc:
-        log.info("%s %s -> %s", request.method, safe, exc.status)
+        log.info("%s %s%s -> %s", request.method, safe, method, exc.status)
         raise
-    log.info("%s %s -> %s", request.method, safe, response.status)
+    log.info("%s %s%s -> %s", request.method, safe, method, response.status)
     return response
 
 
