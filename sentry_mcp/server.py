@@ -4,17 +4,21 @@
 Transport is settled (§12.1): HTTP in from the agent via the Funnel path, HTTP
 out to Playwright MCP on port 8931.
 
-**This listener does not scan yet, and therefore does not deliver content.**
-The scoring pipeline (§5) is unbuilt, so `tools/call` is refused rather than
-forwarded. That is §5.2's fail-closed discipline applied one level up: a proxy
-that cannot screen content must not hand it over, and a pass-through that
-quietly skipped scanning would be a security regression wearing the shape of
-progress. The refusal is deliberate and should be deleted in the same change
-that wires the pipeline in — not before.
+`tools/list` is modified, not relayed (§4.1): the proxy advertises its own
+`fetch_rendered` (§2.1) and, by default, hides the upstream `browser_*`
+primitives. Hiding them is a safety property rather than tidiness — an exposed
+`browser_navigate` is a second route to page content that does not pass through
+the pipeline, so leaving it visible would put an unscanned door beside the
+scanned one. Setting `SENTRY_MCP_EXPOSE_UPSTREAM_TOOLS=1` opens that door
+deliberately; nothing opens it by accident.
 
-Everything else proxies unmodified, so an agent can complete `initialize`
-against this and see a valid MCP server: the handshake, `tools/list`, pings and
-notifications all reach the upstream and come back untouched.
+`tools/call` is routed: `fetch_rendered` is owned here and originates its own
+upstream sequence; anything else is forwarded untouched, and refused outright
+while the upstream tools are hidden. Everything else — the handshake, pings,
+notifications — proxies unmodified.
+
+A judge failure raises out of the pipeline and becomes an MCP error. The page
+content is not delivered, not summarised, and not partially described (§5.2).
 
 Known gap, v1: only JSON request/response bodies are handled. MCP's streamable
 HTTP transport can answer with `text/event-stream`, and §4.1 requires
@@ -33,20 +37,30 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
+from .fetch import TOOL_DEFINITION, TOOL_NAME, FetchError, fetch_rendered, to_tool_result
+from .judge import JudgeUnavailable
+from .pipeline import Thresholds
+from .upstream import UpstreamError, UpstreamMCP
+
 log = logging.getLogger(__name__)
 
 # JSON-RPC error codes. -32700 is the standard parse error; the -32000..-32099
 # block is reserved for implementation-defined server errors, which both of the
 # conditions below are.
 PARSE_ERROR = -32700
-PIPELINE_UNBUILT = -32000
+METHOD_NOT_FOUND = -32601
+TOOL_HIDDEN = -32000
 UPSTREAM_UNAVAILABLE = -32001
+JUDGE_UNAVAILABLE = -32002
+FETCH_FAILED = -32003
+BATCH_UNSUPPORTED = -32004
 
 # Set by the proxy on its own responses so a caller can tell a refusal from this
 # hop apart from one the upstream generated.
 KEY_CONFIG = web.AppKey("config", "Config")
 KEY_SESSION = web.AppKey("session", aiohttp.ClientSession)
 KEY_JUDGE = web.AppKey("judge", object)
+KEY_THRESHOLDS = web.AppKey("thresholds", Thresholds)
 
 # Hop-by-hop headers must not be relayed; the rest of the request's headers are
 # not forwarded at all, since the upstream is a local process that needs none of
@@ -69,6 +83,12 @@ class Config:
     upstream: str = "http://127.0.0.1:8931"
     upstream_path: str = "/mcp"
     upstream_timeout_s: float = 30.0
+    # §4.2: these names are the spec's illustrative guesses and must be checked
+    # against a live Playwright MCP. Configurable so a rename is a config edit.
+    navigate_tool: str = "browser_navigate"
+    snapshot_tool: str = "browser_snapshot"
+    # Off by default. See the module docstring for why this is a safety switch.
+    expose_upstream_tools: bool = False
 
     @property
     def upstream_url(self) -> str:
@@ -98,6 +118,8 @@ class Config:
             except ValueError as exc:
                 raise ValueError(f"{name}={raw!r} is not a valid {cast.__name__}") from exc
 
+        expose = (env.get("SENTRY_MCP_EXPOSE_UPSTREAM_TOOLS") or "").strip().lower()
+
         return cls(
             host=env.get("SENTRY_MCP_HOST") or defaults.host,
             port=_num("SENTRY_MCP_PORT", defaults.port, int),
@@ -106,6 +128,9 @@ class Config:
             upstream_timeout_s=_num(
                 "SENTRY_MCP_UPSTREAM_TIMEOUT", defaults.upstream_timeout_s, float
             ),
+            navigate_tool=env.get("SENTRY_MCP_NAVIGATE_TOOL") or defaults.navigate_tool,
+            snapshot_tool=env.get("SENTRY_MCP_SNAPSHOT_TOOL") or defaults.snapshot_tool,
+            expose_upstream_tools=expose in {"1", "true", "yes", "on"},
         )
 
 
@@ -148,15 +173,26 @@ async def handle_health(request: web.Request) -> web.Response:
 
     cfg = request.app[KEY_CONFIG]
     judge = request.app[KEY_JUDGE]
+    thresholds = request.app[KEY_THRESHOLDS]
     return web.json_response(
         {
             "name": "sentry-mcp",
             "version": __version__,
             "listen": f"{cfg.host}:{cfg.port}",
             "upstream": cfg.upstream_url,
-            "judge": {"model": getattr(judge, "model", None), "configured": bool(getattr(judge, "available", False))},
-            "scanning": False,
-            "detail": "scoring pipeline (spec section 5) not implemented; tools/call is refused",
+            "judge": {
+                "model": getattr(judge, "model", None),
+                "configured": bool(getattr(judge, "available", False)),
+            },
+            "scanning": True,
+            "tiers_implemented": [1],
+            "tiers_missing": {
+                "2": "boilerplate removal (spec section 5.4)",
+                "3": "rendered page image (spec section 5.5)",
+            },
+            "upstream_tools_exposed": cfg.expose_upstream_tools,
+            "upstream_tool_names_verified": False,
+            "block_at_or_above": thresholds.block_at_or_above,
         }
     )
 
@@ -171,15 +207,105 @@ async def handle_mcp(request: web.Request) -> web.Response:
         return _rpc_error(None, PARSE_ERROR, "request body is not valid JSON")
 
     envelopes = _envelopes(payload)
-    if any(env.get("method") == "tools/call" for env in envelopes):
-        # Refused, not forwarded. See the module docstring.
+    methods = {env.get("method") for env in envelopes}
+
+    if isinstance(payload, list) and methods & {"tools/list", "tools/call"}:
+        # Both are rewritten rather than relayed, and doing that inside a batch
+        # would mean reassembling a mixed response. Refused plainly instead of
+        # handled subtly.
         return _rpc_error(
             _first_id(envelopes),
-            PIPELINE_UNBUILT,
-            "tools/call is refused: the scoring pipeline (spec section 5) is not "
-            "implemented, so fetched content cannot be screened and will not be "
-            "delivered unscreened",
+            BATCH_UNSUPPORTED,
+            "batched tools/list and tools/call are not supported; send them singly",
         )
+
+    if methods == {"tools/list"}:
+        return await _handle_tools_list(request, envelopes[0])
+    if methods == {"tools/call"}:
+        return await _handle_tools_call(request, envelopes[0])
+
+    return await _forward(request, raw, envelopes)
+
+
+async def _handle_tools_list(request: web.Request, envelope: dict) -> web.Response:
+    """Advertise `fetch_rendered`, and hide the upstream primitives (§2.1, §4.1)."""
+    cfg = request.app[KEY_CONFIG]
+    upstream = _upstream(request)
+
+    tools = [TOOL_DEFINITION]
+    if cfg.expose_upstream_tools:
+        try:
+            # Any upstream tool that is exposed must carry its upstream schema
+            # unaltered (§4.1), so these are relayed verbatim.
+            tools.extend(await upstream.list_tools())
+        except UpstreamError as exc:
+            return _rpc_error(envelope.get("id"), UPSTREAM_UNAVAILABLE, str(exc))
+
+    return web.json_response(
+        {"jsonrpc": "2.0", "id": envelope.get("id"), "result": {"tools": tools}}
+    )
+
+
+async def _handle_tools_call(request: web.Request, envelope: dict) -> web.Response:
+    cfg = request.app[KEY_CONFIG]
+    params = envelope.get("params") or {}
+    name = params.get("name")
+    request_id = envelope.get("id")
+
+    if name != TOOL_NAME:
+        if not cfg.expose_upstream_tools:
+            return _rpc_error(
+                request_id,
+                TOOL_HIDDEN,
+                f"unknown tool {name!r}. Upstream browser tools are hidden so that "
+                "page content cannot reach the caller without being screened; "
+                f"use {TOOL_NAME!r} instead",
+            )
+        return await _forward(request, await request.read(), [envelope])
+
+    upstream = _upstream(request)
+    judge = request.app[KEY_JUDGE]
+
+    try:
+        text, scan = await fetch_rendered(
+            upstream,
+            judge,
+            (params.get("arguments") or {}).get("url"),
+            navigate_tool=cfg.navigate_tool,
+            snapshot_tool=cfg.snapshot_tool,
+            thresholds=request.app[KEY_THRESHOLDS],
+        )
+    except JudgeUnavailable as exc:
+        # §5.2: terminal. The content is not delivered in any form.
+        log.warning("refusing fetch — judge unavailable: %s", exc)
+        return _rpc_error(
+            request_id,
+            JUDGE_UNAVAILABLE,
+            f"refused: the injection judge could not return a verdict ({exc}). "
+            "Page content is never delivered unscreened.",
+        )
+    except FetchError as exc:
+        return _rpc_error(request_id, FETCH_FAILED, str(exc))
+
+    log.info(
+        "fetched %s — risk %d, coverage %d, judge %s",
+        (params.get("arguments") or {}).get("url"),
+        scan.risk,
+        scan.coverage,
+        "skipped" if scan.judge is None else "invoked",
+    )
+    return web.json_response(
+        {"jsonrpc": "2.0", "id": request_id, "result": to_tool_result(text, scan)}
+    )
+
+
+def _upstream(request: web.Request) -> UpstreamMCP:
+    cfg = request.app[KEY_CONFIG]
+    return UpstreamMCP(request.app[KEY_SESSION], cfg.upstream_url)
+
+
+async def _forward(request: web.Request, raw: bytes, envelopes: list[dict]) -> web.Response:
+    cfg = request.app[KEY_CONFIG]
 
     headers = {
         k: v for k, v in request.headers.items() if k.lower() in _FORWARDED_REQUEST_HEADERS
@@ -211,7 +337,9 @@ async def handle_mcp(request: web.Request) -> web.Response:
         )
 
 
-def create_app(config: Config, judge: object) -> web.Application:
+def create_app(
+    config: Config, judge: object, thresholds: Thresholds | None = None
+) -> web.Application:
     """Build the application.
 
     The judge is passed in already constructed and already checked, so this
@@ -221,6 +349,7 @@ def create_app(config: Config, judge: object) -> web.Application:
     app = web.Application()
     app[KEY_CONFIG] = config
     app[KEY_JUDGE] = judge
+    app[KEY_THRESHOLDS] = thresholds or Thresholds()
 
     async def _session_ctx(app: web.Application):
         timeout = aiohttp.ClientTimeout(total=config.upstream_timeout_s)
