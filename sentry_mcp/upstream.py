@@ -91,10 +91,13 @@ class UpstreamMCP:
                 session_id = response.headers.get("Mcp-Session-Id")
                 if session_id:
                     self._session_id = session_id
+                content_type = response.headers.get("Content-Type", "")
                 body = await response.read()
                 if response.status >= 400:
+                    detail = body[:120].decode("utf-8", "replace").strip()
                     raise UpstreamError(
                         f"upstream returned HTTP {response.status} for {method}"
+                        + (f": {detail}" if detail else "")
                     )
         except aiohttp.ClientError as exc:
             raise UpstreamError(
@@ -103,16 +106,7 @@ class UpstreamMCP:
         except TimeoutError as exc:
             raise UpstreamError(f"upstream timed out on {method}") from exc
 
-        try:
-            envelope = json.loads(body)
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            # An SSE body lands here. Named explicitly rather than reported as
-            # generic malformed JSON, because the fix is different.
-            head = body[:40].decode("utf-8", "replace")
-            raise UpstreamError(
-                f"upstream sent a non-JSON body for {method} (starts {head!r}); "
-                "streamable-HTTP event streams are not yet handled"
-            ) from exc
+        envelope = _decode(body, content_type, method, payload["id"])
 
         if isinstance(envelope, list):
             raise UpstreamError(f"upstream sent a batch response for {method}")
@@ -176,6 +170,59 @@ class UpstreamMCP:
         """
         available = {tool.get("name") for tool in await self.list_tools()}
         return {name: name in available for name in names}
+
+
+def parse_sse(body: bytes) -> list[dict]:
+    """Pull JSON-RPC envelopes out of a `text/event-stream` body.
+
+    Streamable HTTP lets a server answer a single request over SSE, and
+    Playwright MCP does exactly that — every reply, including `initialize`,
+    arrives as `event: message` / `data: {...}` rather than as a JSON body. The
+    response is still complete and finite here (Content-Length is set and the
+    stream ends), so this parses the whole body rather than streaming it.
+
+    Long-lived streams with server-initiated notifications are still unhandled;
+    that needs a different shape entirely and is not what a fetch requires.
+    """
+    envelopes: list[dict] = []
+    for raw_line in body.decode("utf-8", "replace").splitlines():
+        line = raw_line.strip()
+        if not line.startswith("data:"):
+            continue
+        chunk = line[len("data:") :].strip()
+        if not chunk:
+            continue
+        try:
+            parsed = json.loads(chunk)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            envelopes.append(parsed)
+    return envelopes
+
+
+def _decode(body: bytes, content_type: str, method: str, request_id: int) -> Any:
+    """Return the JSON-RPC envelope for `request_id`, whatever the wire format."""
+    if "text/event-stream" in content_type.lower():
+        envelopes = parse_sse(body)
+        if not envelopes:
+            raise UpstreamError(
+                f"upstream sent an event stream for {method} carrying no JSON-RPC data"
+            )
+        for envelope in envelopes:
+            if envelope.get("id") == request_id:
+                return envelope
+        # No id match: a server that answers with a single unlabelled event is
+        # still answering us, since one request is in flight per call here.
+        return envelopes[-1]
+
+    try:
+        return json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        head = body[:60].decode("utf-8", "replace")
+        raise UpstreamError(
+            f"upstream sent an unparseable body for {method} (starts {head!r})"
+        ) from exc
 
 
 def text_blocks(tool_result: dict) -> list[str]:

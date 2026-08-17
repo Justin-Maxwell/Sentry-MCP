@@ -17,7 +17,9 @@ def test_defaults_match_the_deploy_unit():
     # deploy/sentry-mcp.service pins these; a drift here is a drift there.
     cfg = Config()
     assert cfg.port == 8264
-    assert cfg.upstream == "http://127.0.0.1:8931"
+    # localhost, not 127.0.0.1. Playwright MCP's DNS-rebinding guard matches the
+    # Host header literally and 403s the dotted form.
+    assert cfg.upstream == "http://localhost:8931"
 
 
 def test_env_overrides_are_applied():

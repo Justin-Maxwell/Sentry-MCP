@@ -80,7 +80,11 @@ class Config:
 
     host: str = "127.0.0.1"
     port: int = 8264
-    upstream: str = "http://127.0.0.1:8931"
+    # `localhost`, not `127.0.0.1`. Playwright MCP enforces a DNS-rebinding
+    # guard that matches the Host header literally and answers anything else
+    # with "Access is only allowed at localhost:8931" — a 403 that looks like an
+    # auth failure and is not one. Confirmed against 1.63.0-alpha, 2026-08-17.
+    upstream: str = "http://localhost:8931"
     upstream_path: str = "/mcp"
     upstream_timeout_s: float = 30.0
     # §4.2: these names are the spec's illustrative guesses and must be checked
