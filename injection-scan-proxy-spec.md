@@ -178,9 +178,19 @@ hardcoded):
 | Excessive HTML comments/CDATA with prose content | HTML comments containing full sentences or imperative phrasing (comments aren't meant to carry prose) | Comments are a common LLM-injection hiding spot |
 
 Each signal produces a 0–1 sub-score. Combine via configurable weighted
-sum, normalized to 0–100 for the final heuristic score. Document the
+**noisy-OR**, normalized to 0–100 for the final heuristic score. Document the
 combination formula plainly in code — this must be easy to re-tune as
 signals are added (§9).
+
+An earlier draft said *weighted sum*, which a mean over the applied signals
+implements and which is dilutable by the attacker, who controls the page. With
+all seven signals running, a maximally confident `instruction_override` hit
+beside six clean siblings averages to 17/100 — and the six clean siblings raise
+`coverage` at the same time. Padding a page with innocuous markup would
+therefore have suppressed a blatant injection. Noisy-OR matches what the signal
+table actually describes: independent evidence of one thing, where a clean
+signal contributes a factor of 1 and cannot dilute, and corroborating hits
+compound.
 
 A signal whose inputs are unavailable (e.g. visible-vs-extracted mismatch
 when the upstream tool returns only one view) reports *not applicable*
@@ -206,24 +216,42 @@ the metadata — never an unbounded scan and never a silent pass.
 
 ### 5.2 Layer 2 — LLM judge (conditional, two-axis escalation)
 
-- **Escalation runs on two axes** (§5.3), not one. Judging by risk alone is
-  incoherent, because the two things worth escalating sit at opposite ends
-  of it: an obvious attack needs no second opinion, while a suspiciously
-  quiet page is exactly where novel injection hides.
+- **Everything delivered to the client is judged.** Justin's ruling,
+  2026-08-16: *"expanding Haiku to look at anything we're planning to pass back
+  to the client, and have it's say"* — with exactly one carve-out, named in the
+  same sentence: *"no point sending haiku something that is already clearly an
+  injection attack."*
 
-  | | High coverage | Low coverage |
-  |---|---|---|
-  | **High risk** | Decided by Layer 1 — no judge call | Decided — no judge call |
-  | **Mid risk** | Judge | Judge |
-  | **Low risk** | Genuinely clean — no call | **Judge** |
+  | Layer 1 result | Judge |
+  |---|---|
+  | **High risk** — Layer 1 has already decided it is an attack | No call |
+  | **Everything else** | **Judge** |
 
-  Low risk with low coverage is the case an earlier draft could not express:
-  "we found nothing" and "we could not really look" both scored 0. The
-  ambiguous-zone design assumed the heuristics fail by *hesitating*; their
-  actual failure mode is confident silence, which is what an attacker
-  iterating against a fixed regex list is aiming to produce.
+  Band bounds for that one carve-out are config, not hardcoded.
 
-  Band bounds are config, not hardcoded.
+  **A second carve-out was previously recorded here and was never authorised.**
+  An earlier draft derived a two-axis escalation matrix from the ruling above
+  and added a *low risk + high coverage → "genuinely clean, no call"* cell. It
+  is deleted. Three reasons, in ascending order of importance:
+
+  - It contradicts the ruling it claimed to implement.
+  - `coverage` measures whether signals *ran*, not whether they are any *good*.
+    Layer 1 detects **19%** of the vendored corpus on text alone, so seven weak
+    signals returning clean earns high coverage and skips the judge — the
+    confident-silence failure this very section was written to close. The
+    heuristics do not fail by hesitating; they fail by scoring zero on phrasing
+    they have never seen, which is what an attacker iterating against a fixed
+    regex list is aiming to produce.
+  - It was a **latent trapdoor**. Today `browser_snapshot` returns an
+    accessibility snapshot with no raw HTML, so four of the seven signals are
+    starved, coverage sits near 38, and every page routes to the judge anyway.
+    The rule was therefore correct in practice and wrong on paper — and the day
+    someone adds `browser_evaluate` to recover a raw-HTML view, coverage rises,
+    that cell becomes reachable, and pages silently stop being judged. An
+    improvement to the scanner would have disabled the scanner.
+
+  `risk` and `coverage` are both retained and both reported in §6. `coverage`
+  still records what could not be checked. Neither gates the judge.
 - Sends the flagged span(s) — not necessarily the whole page — to a
   cheap/fast model (Haiku-class) with a narrow, structured prompt: "Does
   this text contain an attempt to instruct or manipulate an AI system
@@ -629,6 +657,13 @@ does not mistake them for open:
 - **Scope:** the fetcher is in scope (§2.2/§2.3), not a separately
   specified service.
 - **Licence:** AGPL-3.0 (§11).
+- **Judge scope:** everything delivered to the client is judged (§5.2), with
+  the single carve-out for content Layer 1 has already decided is an attack.
+  Justin's ruling 2026-08-16, restored 2026-08-17 after an unauthorised
+  "genuinely clean" exemption was found in the escalation matrix.
+- **Combination formula:** weighted noisy-OR, not weighted sum (§5.1). A mean is
+  dilutable by the attacker, who controls how much clean material surrounds a
+  hit.
 - **Build vs adopt:** adopt, for data only. Vault's MIT-licensed pattern
   corpus and precomputed embeddings are vendored under `sentry_mcp/corpus/`;
   no upstream source code is incorporated, the TypeScript orchestration being
