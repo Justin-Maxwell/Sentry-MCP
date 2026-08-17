@@ -1,0 +1,72 @@
+# A second Tailscale device on the same host, so this service gets its own
+# hostname — and therefore its own origin.
+#
+# WHY THIS EXISTS.
+#
+# OAuth discovery is origin-scoped, and claude.ai falls back to the *port-less*
+# origin when a resource's own origin has no metadata. Observed 2026-08-17: for
+# a resource at https://clautana.wallaby-enigmatic.ts.net:8443/mcp it probed
+#
+#   https://clautana.wallaby-enigmatic.ts.net:8443/.well-known/…   → 404 (us)
+#   https://clautana.wallaby-enigmatic.ts.net/.well-known/…        → 200 (CLARA)
+#
+# in the same second, and then tried to register a client against Tana's
+# authorization server for a resource Tana knows nothing about. CLARA's metadata
+# names `resource: https://clautana.wallaby-enigmatic.ts.net` — the whole host —
+# so every port on that hostname inherits its OAuth requirement.
+#
+# §3's "own path on the existing Funnel" is therefore not achievable, and
+# neither is "own port". The only fix that does not involve editing CLARA's
+# metadata — and so risking a working Tana bridge to fix a new one — is a
+# separate hostname.
+#
+# WHAT THIS IS NOT.
+#
+# Not a second machine, not a container, not a VPN. It is a second tailscaled
+# process with its own state directory and control socket, which the tailnet
+# sees as a distinct device. It uses userspace networking, so it needs no TUN
+# device of its own and cannot disturb the existing tailnet interface.
+#
+# Install:
+#   sudo mkdir -p /var/lib/tailscale-mtg /run/tailscale-mtg
+#   sudo cp deploy/tailscaled-mindthegap.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now tailscaled-mindthegap
+#
+# Then join the tailnet under its own name and publish the service:
+#   sudo tailscale --socket=/run/tailscale-mtg/tailscaled.sock up --hostname=mind-the-gap
+#   sudo tailscale --socket=/run/tailscale-mtg/tailscaled.sock funnel --bg \
+#        "http://127.0.0.1:8090/t/$(sudo grep -oP '(?<=^SENTRY_MCP_TOKEN=).*' /etc/sentry-mcp/judge.env)"
+#
+# The connector URL then becomes:
+#   https://mind-the-gap.wallaby-enigmatic.ts.net/mcp
+#
+# and its discovery namespace is its own: nothing else answers on that host, so
+# the port-less fallback lands on this service and 404s, which is what tells
+# claude.ai no OAuth is required.
+
+[Unit]
+Description=tailscaled (second device: mind-the-gap)
+Documentation=https://tailscale.com/kb/1242/tailscale-serve
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+# --tun=userspace-networking: no second TUN interface, so this cannot interfere
+#   with the primary tailscaled's routing.
+# --port=41642: the primary uses 41641. A collision here fails at bind rather
+#   than silently degrading, but there is no reason to find that out live.
+# --socket: the control socket every `tailscale --socket=…` command must name.
+ExecStart=/usr/sbin/tailscaled \
+    --state=/var/lib/tailscale-mtg/tailscaled.state \
+    --statedir=/var/lib/tailscale-mtg \
+    --socket=/run/tailscale-mtg/tailscaled.sock \
+    --port=41642 \
+    --tun=userspace-networking
+RuntimeDirectory=tailscale-mtg
+StateDirectory=tailscale-mtg
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
