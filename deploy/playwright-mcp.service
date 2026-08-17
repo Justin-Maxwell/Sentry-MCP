@@ -42,11 +42,11 @@
 # to uid 1001 and is not writable by 1200.
 
 [Unit]
-Description=Playwright MCP — headless browser for Sentry-MCP
+Description=Playwright MCP — drives the Sentry-MCP fetch browser over CDP
 Documentation=https://github.com/microsoft/playwright-mcp
-After=network-online.target docker.service
+After=network-online.target docker.service sentry-chromium.service
 Wants=network-online.target
-Requires=docker.service
+Requires=docker.service sentry-chromium.service
 
 [Service]
 Type=simple
@@ -58,23 +58,37 @@ RestartSec=5
 # --init reaps the zombie processes a browser leaves behind.
 # --shm-size: Chromium's default 64MB /dev/shm causes tab crashes on real pages.
 # --security-opt no-new-privileges mirrors the proxy unit's NoNewPrivileges.
+# CDP MODE. The container no longer launches a browser; it drives the headful
+# Chromium in sentry-chromium.service over the debugging port. That moves the
+# isolation boundary: the container is now only a node process speaking MCP, and
+# the thing that actually renders hostile pages is a host browser running as
+# sentry-browser with its own profile and its own display. The uid split still
+# holds; the container simply matters less.
+#
+# --network host, consequently. The debugging port stays bound to loopback,
+# which is what keeps a browser-automation channel off the tailnet — reaching it
+# from a bridge network would have meant binding it more widely, which is the
+# wrong trade. Sharing the host namespace to keep 9223 loopback-only is the
+# better one.
 ExecStartPre=-/usr/bin/docker rm -f playwright-mcp
 ExecStart=/usr/bin/docker run --rm --name playwright-mcp \
     --init \
     --user 1200 \
     --env HOME=/tmp \
-    --shm-size=1g \
+    --network host \
     --security-opt no-new-privileges \
     --cap-drop ALL \
     --read-only \
     --tmpfs /tmp:rw,nosuid,size=512m \
-    --publish 127.0.0.1:8931:8931 \
     mcr.microsoft.com/playwright/mcp \
-    --host 0.0.0.0 --port 8931 \
-    --headless \
-    --isolated \
+    --host 127.0.0.1 --port 8931 \
+    --cdp-endpoint http://127.0.0.1:9223 \
     --block-service-workers
 ExecStop=/usr/bin/docker stop playwright-mcp
+
+# --headless and --isolated are both gone, and their absence is the point:
+# the browser is headful because a person may need to answer it, and its profile
+# persists so that answer, and any sign-in, survives to the next fetch.
 
 # --isolated keeps no profile between sessions, so one fetched page cannot leave
 # cookies or storage for the next. --block-service-workers stops a page

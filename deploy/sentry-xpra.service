@@ -1,0 +1,64 @@
+# A virtual display for the fetch browser, viewable over xpra.
+#
+# WHY A HEADFUL BROWSER AT ALL.
+#
+# The use case is not scraping. It is: Justin finds a product listing, and wants
+# an agent to read it and comment — work he currently does by taking repeated
+# screenshots by hand. That is his own browsing, on his own behalf, one URL at a
+# time, and a real browser is simply the honest way to do it.
+#
+# It also happens to be the thing that makes verification pages tractable,
+# because when one appears there is a human who can answer it. A headless
+# container browser has nobody to ask. Nothing here defeats a challenge; it puts
+# a person in front of one, which is what the challenge is asking for.
+#
+# Modelled on the existing tana-xpra unit, deliberately: same pattern, same
+# host, different user and different display.
+#
+# Install:
+#   sudo cp deploy/sentry-xpra.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now sentry-xpra
+#
+# View it:
+#   ssh -L 14501:127.0.0.1:14501 justin@clautana
+#   then open http://localhost:14501/ in a local browser
+#
+# Display :101 and port 14501 sit one above the tana stack's :100 and 14500, so
+# a collision is obvious on sight rather than mysterious at runtime.
+
+[Unit]
+Description=Xpra display :101 for the Sentry-MCP fetch browser
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sentry-browser
+Group=sentry-browser
+
+# The account was created with --no-create-home; systemd provides the state
+# directory instead, so nothing needs a real home.
+StateDirectory=sentry-browser
+Environment=HOME=/var/lib/sentry-browser
+Environment=XDG_RUNTIME_DIR=/run/sentry-browser
+RuntimeDirectory=sentry-browser
+
+ExecStart=/usr/bin/xpra start :101 \
+    --bind-tcp=127.0.0.1:14501 \
+    --resize-display=1280x900 \
+    --dpi=96 \
+    --open-url=no \
+    --html=on \
+    --daemon=no \
+    --systemd-run=no \
+    --start-new-commands=no
+
+# --start-new-commands=no: the display exists to show one browser, started by
+# its own unit. Nothing should be able to launch arbitrary commands on it.
+# --bind-tcp on loopback only: reachable through an SSH tunnel, never directly.
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

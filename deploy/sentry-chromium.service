@@ -1,0 +1,64 @@
+# The fetch browser: a real Chromium, on the xpra display, driven over CDP.
+#
+# NOT THE TANA BROWSER. This is the constraint that shapes the whole unit.
+#
+# There is already a Chromium on this host, running as `tana`, holding an
+# authenticated Tana session for the Outliner. Driving arbitrary fetched pages
+# through *that* browser would put hostile content in the same cookie jar as the
+# knowledge base this proxy exists to protect — a worse version of the uid
+# collision the browser container was moved off 1001 to avoid, because a shared
+# profile defeats a separate uid entirely.
+#
+# So: separate user, separate profile, separate display, separate debugging
+# port. The two browsers never meet.
+#
+# WHAT THE PERSISTENT PROFILE BUYS, AND COSTS.
+#
+# The profile is on disk rather than in memory, unlike the container browser's
+# --isolated mode. That is deliberate: when a site asks a human to verify, the
+# human answers once and the result persists, and a signed-in shopping session
+# stays signed in. The cost is that one fetched page's cookies outlive the fetch
+# and are visible to the next. For a browsing profile that is the point; it is
+# also why this profile must never hold anything that matters.
+#
+# Install:
+#   sudo cp deploy/sentry-chromium.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now sentry-chromium
+
+[Unit]
+Description=Chromium for Sentry-MCP fetches (CDP on 9223)
+After=sentry-xpra.service
+Requires=sentry-xpra.service
+
+[Service]
+Type=simple
+User=sentry-browser
+Group=sentry-browser
+
+StateDirectory=sentry-browser
+Environment=HOME=/var/lib/sentry-browser
+Environment=XDG_RUNTIME_DIR=/run/sentry-browser
+RuntimeDirectory=sentry-browser
+Environment=DISPLAY=:101
+
+# --remote-debugging-port binds loopback only, which is what keeps a browser
+#   automation channel off the tailnet and off the internet.
+# --remote-allow-origins is required by current Chromium for a websocket
+#   attach; the port is loopback-only, so the wildcard grants nothing further.
+# --no-first-run / --no-default-browser-check: an interactive prompt on a
+#   display nobody is watching is a hang, not a question.
+ExecStart=/usr/bin/chromium \
+    --user-data-dir=/var/lib/sentry-browser/profile \
+    --remote-debugging-port=9223 \
+    --remote-allow-origins=* \
+    --no-first-run \
+    --no-default-browser-check \
+    --disable-background-networking \
+    --disable-component-update \
+    --window-size=1280,900
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
