@@ -96,6 +96,9 @@ class HeuristicResult:
     truncated: bool = False
     elapsed_ms: int = 0
     scanned_chars: int = 0
+    # Machine-readable reasons coverage fell below 100, for §6's metadata block.
+    # Kept as tokens rather than prose so a caller can branch on them.
+    coverage_reductions: list[str] = field(default_factory=list)
 
     @property
     def applied(self) -> list[SignalResult]:
@@ -528,13 +531,24 @@ def scan(
             survival *= 1.0 - min(1.0, max(0.0, contribution))
         risk = round(100 * (1.0 - survival))
 
+    reductions: list[str] = []
+    if content.html is None:
+        reductions.append("no_raw_html")
+    if content.visible_text is None:
+        reductions.append("no_visible_text")
+
     coverage_ratio = (applied_weight / total_weight) if total_weight else 0.0
     if truncated:
         coverage_ratio *= 0.7
+        reductions.append("size_cap")
     if content.language is None:
         coverage_ratio *= 0.85
+        reductions.append("language_undetermined")
     elif not content.language.lower().startswith("en"):
         coverage_ratio *= 0.5
+        reductions.append("non_english")
+    if any(s.excluded_reason == "scan time budget exhausted" for s in results):
+        reductions.append("time_cap")
 
     return HeuristicResult(
         risk=max(0, min(100, risk)),
@@ -543,4 +557,5 @@ def scan(
         truncated=truncated,
         elapsed_ms=round((time.monotonic() - started) * 1000),
         scanned_chars=len(content.text),
+        coverage_reductions=reductions,
     )

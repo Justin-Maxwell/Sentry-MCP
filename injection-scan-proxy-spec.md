@@ -480,12 +480,16 @@ compatibility). Fields:
   protected. Defang before emitting: strip zero-width and control
   characters, and wrap the excerpt in a delimiter the surrounding
   metadata declares as inert data.
-- If Layer 2 wasn't invoked (score outside ambiguous zone, or no API key
-  configured), `llm_judge.invoked: false` and no `score`/`reason`.
+- `llm_judge.invoked: false` has exactly one cause: Layer 1 returned high risk
+  and §5.2's single carve-out applied. It is never false for want of
+  configuration — a missing key refuses at startup — and never false because a
+  page looked clean, which is the exemption §5.2 removed.
 - If content genuinely was not scanned: `scanned: false` plus `skip_reason`
-  (e.g. `no_judge_configured`, `size_cap`, `ocr_unavailable`), and no
+  (e.g. `size_cap`, `ocr_unavailable`), and no
   `risk`/`warning_level`/`signals`. `binary_content` is **no longer** a valid
-  skip reason — images are scanned per §5.5.
+  skip reason — images are scanned per §5.5. Neither is `no_judge_configured`:
+  the proxy does not start without a judge, so no request can reach this path
+  unconfigured.
 - **A tier-3 response with `scanned: false` must be loud.** A quiet
   `scanned: false` on the path that fires when a site is most hostile is the
   worst possible failure mode. Emit an explicit
