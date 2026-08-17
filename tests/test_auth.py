@@ -93,6 +93,28 @@ def test_query_parameter_is_not_an_accepted_channel():
     assert status == 404
 
 
+def test_tunnel_path_form_is_accepted():
+    # Tailscale rewrites the public /scan prefix to /t/<token>, so claude.ai —
+    # which cannot set a header — reaches an authenticated endpoint without the
+    # secret ever appearing in the public URL.
+    status, body = run(cfg_kw={"token": TOKEN}, path=f"/t/{TOKEN}/mcp")
+    assert status == 200
+    assert "fetch_rendered" in body
+
+
+def test_wrong_token_in_the_path_is_rejected():
+    status, _ = run(cfg_kw={"token": TOKEN}, path="/t/not-the-token/mcp")
+    assert status == 404
+
+
+def test_tunnel_path_health_also_works():
+    status, body = run(
+        cfg_kw={"token": TOKEN}, path=f"/t/{TOKEN}/health", method="GET"
+    )
+    assert status == 200
+    assert json.loads(body)["auth_required"] is True
+
+
 def test_health_reports_whether_auth_is_on_but_not_the_secret():
     status, body = run(cfg_kw={"token": TOKEN}, path="/health", method="GET")
     assert status == 200

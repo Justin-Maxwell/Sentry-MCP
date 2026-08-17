@@ -257,17 +257,32 @@ async def handle_health(request: web.Request) -> web.Response:
 def _authorised(request: web.Request) -> bool:
     """Constant-time check of the shared secret, if one is configured.
 
-    Accepts `Authorization: Bearer <token>` or `X-Sentry-Token: <token>`.
-    Deliberately does not accept a query parameter: that would be logged.
+    Two channels, because the two clients differ in what they can do:
+
+    - `Authorization: Bearer <token>` or `X-Sentry-Token: <token>`, for anything
+      that can set a header — the CLI, scripts, a local agent.
+    - A `/t/<token>/…` path prefix, for claude.ai. Anthropic's servers connect
+      to a URL and cannot attach a custom header, so a header-only design makes
+      a web-chat connector impossible.
+
+    The path form is *not* a capability URL. Tailscale rewrites `/scan` to
+    `/t/<token>` on the way in, so the secret lives in the tunnel config —
+    root-readable only — and never appears in the public URL, in browser
+    history, or in anything the user might paste. The public URL stays boring.
+
+    A query parameter is deliberately not a channel: it would be written to the
+    access log on every request. The path form would be too, which is why the
+    aiohttp access log is disabled in `create_app`.
     """
     cfg = request.app[KEY_CONFIG]
     if not cfg.token:
         return True
 
-    presented = ""
-    auth = request.headers.get("Authorization", "")
-    if auth.lower().startswith("bearer "):
-        presented = auth[7:].strip()
+    presented = request.match_info.get("token", "")
+    if not presented:
+        auth = request.headers.get("Authorization", "")
+        if auth.lower().startswith("bearer "):
+            presented = auth[7:].strip()
     if not presented:
         presented = request.headers.get("X-Sentry-Token", "").strip()
 
@@ -460,4 +475,9 @@ def create_app(
     app.cleanup_ctx.append(_session_ctx)
     app.router.add_get("/health", handle_health)
     app.router.add_post("/mcp", handle_mcp)
+    # The tunnel-facing form. Tailscale rewrites the public /scan prefix to
+    # /t/<token>, so the secret arrives from the tunnel rather than from the
+    # caller. Registered second so the plain routes keep priority.
+    app.router.add_get("/t/{token}/health", handle_health)
+    app.router.add_post("/t/{token}/mcp", handle_mcp)
     return app

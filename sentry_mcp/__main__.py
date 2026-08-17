@@ -74,7 +74,12 @@ def main(argv: list[str] | None = None) -> int:
         "accepting that. A judge failure refuses the response outright."
     )
 
-    web.run_app(app, host=config.host, port=config.port, print=None)
+    # access_log=None on purpose. The tunnel-facing route carries the shared
+    # secret in its path (see server._authorised), and an access log would
+    # write that secret to the journal on every request, where it would
+    # outlive any rotation. Per-fetch outcomes are logged by the server itself
+    # — URL, risk, coverage — which is the part worth keeping.
+    web.run_app(app, host=config.host, port=config.port, print=None, access_log=None)
     return 0
 
 
