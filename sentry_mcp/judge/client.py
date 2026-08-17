@@ -18,6 +18,7 @@ per-request.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 
@@ -35,6 +36,8 @@ from .types import (
     Verdict,
     risk_from_verdict,
 )
+
+log = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "claude-haiku-4-5"
 DEFAULT_TIMEOUT_S = 15.0
@@ -170,8 +173,20 @@ class AnthropicJudge:
         except Exception as exc:
             # Deliberately broad: a provider outage, a rate limit, a network
             # blip and an SDK bug are all "no verdict", and all of them refuse.
+            #
+            # The *outcome* is identical, but the *diagnosis* is not, and an
+            # earlier version raised only `type(exc).__name__`. That made a
+            # malformed request, an expired key and a rate limit indistinguishable
+            # from each other in the one place an operator looks. The provider's
+            # message is included, truncated: it is written by the API, not by
+            # the page, and without it a fail-closed system gives no way to find
+            # out why it closed.
             self._record_failure()
-            raise JudgeUnavailable(JudgeStatus.ERROR, type(exc).__name__) from exc
+            detail = f"{type(exc).__name__}: {exc}".strip()
+            if len(detail) > 300:
+                detail = detail[:299] + "…"
+            log.warning("judge call failed: %s", detail)
+            raise JudgeUnavailable(JudgeStatus.ERROR, detail) from exc
 
         block = next(
             (
