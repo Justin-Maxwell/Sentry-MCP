@@ -32,6 +32,7 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -452,6 +453,47 @@ async def _forward(request: web.Request, raw: bytes, envelopes: list[dict]) -> w
         )
 
 
+# Everything between /t/ and the next slash is the shared secret.
+_TOKEN_IN_PATH = re.compile(r"/t/[^/]+")
+
+
+@web.middleware
+async def redacted_access_log(request: web.Request, handler):
+    """Log every request with the path-borne secret masked.
+
+    aiohttp's own access log is disabled because it would write the token to
+    the journal verbatim, where it outlives any rotation. Dropping request
+    logging altogether was the wrong correction: the first time a client failed
+    to connect, there was no record of what it had asked for. This keeps the
+    record and removes the secret.
+    """
+    safe = _TOKEN_IN_PATH.sub("/t/<redacted>", request.path_qs)
+    try:
+        response = await handler(request)
+    except web.HTTPException as exc:
+        log.info("%s %s -> %s", request.method, safe, exc.status)
+        raise
+    log.info("%s %s -> %s", request.method, safe, response.status)
+    return response
+
+
+async def handle_mcp_get(request: web.Request) -> web.Response:
+    """Answer a GET on the MCP endpoint (streamable HTTP).
+
+    The transport lets a client open a GET to receive server-initiated
+    messages, and lets a server decline with 405. This proxy has nothing to
+    push, so it declines — explicitly, because a 404 here reads as "wrong URL"
+    and can leave a client waiting rather than moving on.
+    """
+    if not _authorised(request):
+        return web.Response(status=404, text="not found")
+    return web.Response(
+        status=405,
+        text="this endpoint does not serve a server-initiated event stream",
+        headers={"Allow": "POST"},
+    )
+
+
 def create_app(
     config: Config, judge: object, thresholds: Thresholds | None = None
 ) -> web.Application:
@@ -461,7 +503,7 @@ def create_app(
     function never decides whether the process is allowed to run — that belongs
     to startup (`__main__`), where a refusal can still be an exit code.
     """
-    app = web.Application()
+    app = web.Application(middlewares=[redacted_access_log])
     app[KEY_CONFIG] = config
     app[KEY_JUDGE] = judge
     app[KEY_THRESHOLDS] = thresholds or Thresholds()
@@ -475,9 +517,11 @@ def create_app(
     app.cleanup_ctx.append(_session_ctx)
     app.router.add_get("/health", handle_health)
     app.router.add_post("/mcp", handle_mcp)
+    app.router.add_get("/mcp", handle_mcp_get)
     # The tunnel-facing form. Tailscale rewrites the public /scan prefix to
     # /t/<token>, so the secret arrives from the tunnel rather than from the
     # caller. Registered second so the plain routes keep priority.
     app.router.add_get("/t/{token}/health", handle_health)
     app.router.add_post("/t/{token}/mcp", handle_mcp)
+    app.router.add_get("/t/{token}/mcp", handle_mcp_get)
     return app
