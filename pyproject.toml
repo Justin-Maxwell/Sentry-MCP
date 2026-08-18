@@ -18,6 +18,12 @@ license-files = ["LICENSE", "NOTICE"]
 dependencies = [
     "aiohttp>=3.9",
     "anthropic>=0.40",
+    # Tier 3's resolution parity (spec §5.5) is a resize, and a resize needs a
+    # decoder. Listed as a hard dependency rather than an extra because §5.5
+    # calls tier 3 required, not optional — but imported lazily, so a
+    # deployment missing it still serves the text tiers and says what is
+    # missing at the point of use.
+    "pillow>=10",
 ]
 
 [project.optional-dependencies]
