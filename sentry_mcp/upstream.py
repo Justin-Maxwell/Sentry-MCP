@@ -23,10 +23,13 @@ assuming.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any
 
 import aiohttp
+
+log = logging.getLogger(__name__)
 
 PROTOCOL_VERSION = "2025-06-18"
 
@@ -45,10 +48,16 @@ class UpstreamError(Exception):
 
     Carries an optional JSON-RPC error code so the proxy can relay a faithful
     error rather than flattening every upstream failure into one (§4.1).
+
+    `session_expired` marks the subset worth retrying on a fresh session rather
+    than reporting. See `call_tool`.
     """
 
-    def __init__(self, message: str, *, code: int | None = None) -> None:
+    def __init__(
+        self, message: str, *, code: int | None = None, session_expired: bool = False
+    ) -> None:
         self.code = code
+        self.session_expired = session_expired
         super().__init__(message)
 
 
@@ -115,7 +124,12 @@ class UpstreamMCP:
                     detail = body[:120].decode("utf-8", "replace").strip()
                     raise UpstreamError(
                         f"upstream returned HTTP {response.status} for {method}"
-                        + (f": {detail}" if detail else "")
+                        + (f": {detail}" if detail else ""),
+                        # 404 on an established session is the server saying it
+                        # no longer knows that id, not that the endpoint is
+                        # missing — the endpoint answered us moments ago.
+                        session_expired=response.status == 404
+                        and self._session_id is not None,
                     )
         except aiohttp.ClientError as exc:
             raise UpstreamError(
@@ -215,8 +229,12 @@ class UpstreamMCP:
             # per call here, so this is still our answer.
             return self._unwrap(last, method)
 
+        # An empty stream is how the observed session death presents from the
+        # client side: HTTP 200, no events, and every later call 404s. Treated
+        # as expiry so the retry path covers both faces of the same failure.
         raise UpstreamError(
-            f"upstream closed the event stream for {method} without answering"
+            f"upstream closed the event stream for {method} without answering",
+            session_expired=self._session_id is not None,
         )
 
     async def initialize(self) -> dict:
@@ -255,7 +273,41 @@ class UpstreamMCP:
         result = await self._rpc("tools/list")
         return (result or {}).get("tools", [])
 
+    def reset(self) -> None:
+        """Forget the session, so the next call handshakes afresh."""
+        self._session_id = None
+        self._initialised = False
+
     async def call_tool(self, name: str, arguments: dict | None = None) -> dict:
+        """Call an upstream tool, once more on a fresh session if it expired.
+
+        Playwright MCP drops sessions abruptly under heavy pages — measured
+        2026-08-18, on call 2 of a fresh session and again straight after a
+        wholly successful 399KB reply. It presents either as HTTP 200 with an
+        empty body or as 404, and once it happens every later call with that id
+        404s, `tools/list` included. Retrying without re-handshaking therefore
+        cannot work, which is what made an earlier retry here useless against
+        the failure it was written for.
+
+        Retried exactly once, and only for expiry. Every upstream tool used by
+        this proxy navigates or reads a page, so a repeat is a second look
+        rather than a second side effect; that is what makes this safe, and it
+        is why the retry lives here rather than around arbitrary methods.
+        """
+        try:
+            return await self._call_tool_once(name, arguments)
+        except UpstreamError as exc:
+            if not exc.session_expired:
+                raise
+            log.warning(
+                "upstream session expired on %s, re-initialising and retrying: %s",
+                name,
+                exc,
+            )
+            self.reset()
+            return await self._call_tool_once(name, arguments)
+
+    async def _call_tool_once(self, name: str, arguments: dict | None) -> dict:
         await self.initialize()
         result = await self._rpc(
             "tools/call", {"name": name, "arguments": arguments or {}}

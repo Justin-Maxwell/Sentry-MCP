@@ -78,7 +78,15 @@ do_units() {
 do_deps() {
     echo "== installing dependencies"
     "$REPO/.venv/bin/pip" install --quiet --editable "$REPO"
-    "$REPO/.venv/bin/python" -c 'import sentry_mcp, aiohttp, anthropic; print("   ok", sentry_mcp.__version__)'
+    "$REPO/.venv/bin/python" -c 'import sentry_mcp, aiohttp, anthropic, PIL; print("   ok", sentry_mcp.__version__)'
+    # Reported, not required. Tier 3 degrades to the vision judge without a
+    # local OCR engine (spec section 5.5), so a missing binary is a coverage
+    # fact worth stating at deploy time rather than a reason to fail here.
+    if command -v tesseract >/dev/null 2>&1; then
+        echo "   ocr  $(tesseract --version 2>&1 | head -1)"
+    else
+        echo "   ocr  tesseract not installed — tier 3 will escalate every image to the judge"
+    fi
 }
 
 do_restart() {

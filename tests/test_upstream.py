@@ -12,7 +12,13 @@ import json
 
 import pytest
 
-from sentry_mcp.upstream import UpstreamError, _decode, evaluate_payload, parse_sse
+from sentry_mcp.upstream import (
+    UpstreamError,
+    UpstreamMCP,
+    _decode,
+    evaluate_payload,
+    parse_sse,
+)
 
 SSE = (
     b"event: message\n"
@@ -95,3 +101,77 @@ def test_evaluate_payload_returns_none_when_there_is_no_result_section():
 
 def test_evaluate_payload_returns_none_for_a_result_free_tool_result():
     assert evaluate_payload({"content": []}) is None
+
+
+# --- session expiry ----------------------------------------------------------
+
+# Playwright MCP drops sessions abruptly under heavy pages. Both faces of it are
+# covered here, because a retry that does not re-handshake cannot help with
+# either — the id is gone, not merely unlucky.
+
+
+class _FakeUpstream(UpstreamMCP):
+    """Records calls and replays a scripted sequence of outcomes."""
+
+    def __init__(self, outcomes):
+        super().__init__(session=None, url="http://upstream.invalid/mcp")
+        self.outcomes = list(outcomes)
+        self.calls: list[str] = []
+        self.handshakes = 0
+
+    async def initialize(self):
+        if not self._initialised:
+            self.handshakes += 1
+            self._initialised = True
+            self._session_id = f"session-{self.handshakes}"
+        return {}
+
+    async def _rpc(self, method, params=None):
+        self.calls.append(self._session_id)
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+def _expired(message="gone"):
+    return UpstreamError(message, session_expired=True)
+
+
+def _run(coro):
+    import asyncio
+
+    return asyncio.run(coro)
+
+
+def test_an_expired_session_is_retried_on_a_fresh_one():
+    up = _FakeUpstream([_expired(), {"content": [{"type": "text", "text": "ok"}]}])
+    result = _run(up.call_tool("browser_snapshot"))
+    assert result["content"][0]["text"] == "ok"
+    assert up.handshakes == 2, "the retry must re-handshake, not reuse the dead id"
+    assert up.calls == ["session-1", "session-2"]
+
+
+def test_the_retry_happens_at_most_once():
+    up = _FakeUpstream([_expired("first"), _expired("second")])
+    with pytest.raises(UpstreamError, match="second"):
+        _run(up.call_tool("browser_snapshot"))
+    assert up.handshakes == 2
+
+
+def test_an_ordinary_error_is_not_retried():
+    # A tool that genuinely failed must surface, not be run twice.
+    up = _FakeUpstream([UpstreamError("bad arguments", code=-32602)])
+    with pytest.raises(UpstreamError, match="bad arguments"):
+        _run(up.call_tool("browser_navigate"))
+    assert up.handshakes == 1
+    assert len(up.calls) == 1
+
+
+def test_reset_forces_a_fresh_handshake():
+    up = _FakeUpstream([{"ok": 1}, {"ok": 2}])
+    _run(up.call_tool("browser_snapshot"))
+    up.reset()
+    _run(up.call_tool("browser_snapshot"))
+    assert up.handshakes == 2
+    assert up.calls == ["session-1", "session-2"]

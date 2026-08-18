@@ -24,6 +24,12 @@ dependencies = [
     # deployment missing it still serves the text tiers and says what is
     # missing at the point of use.
     "pillow>=10",
+    # The Python side of OCR. Tiny wrapper; the weight is `tesseract` itself,
+    # which is a system package and deliberately not declared here — a wheel
+    # cannot install it. Listed so `sentry-deploy deps` provisions the wrapper,
+    # leaving only the apt package as a manual step, and so a host with the
+    # binary present needs no second install to start using it.
+    "pytesseract>=0.3.10",
 ]
 
 [project.optional-dependencies]
