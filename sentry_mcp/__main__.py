@@ -65,7 +65,8 @@ def main(argv: list[str] | None = None) -> int:
     # the single property an operator checks.
     log.info(
         "scanning active — layer 1 heuristics, then %s on every delivered "
-        "response; tier 1 only, no boilerplate removal and no image scanning",
+        "response; tiers 1 and 2, chaff removed from delivery only, no image "
+        "scanning",
         judge.model,
     )
     log.warning(

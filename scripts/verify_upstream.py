@@ -56,6 +56,7 @@ async def main() -> int:
         required = {
             "navigate_tool": cfg.navigate_tool,
             "snapshot_tool": cfg.snapshot_tool,
+            "evaluate_tool": cfg.evaluate_tool,
         }
         print("\nconfigured:")
         missing = []

@@ -131,6 +131,7 @@ class Config:
     # against a live Playwright MCP. Configurable so a rename is a config edit.
     navigate_tool: str = "browser_navigate"
     snapshot_tool: str = "browser_snapshot"
+    evaluate_tool: str = "browser_evaluate"
     # Off by default. See the module docstring for why this is a safety switch.
     expose_upstream_tools: bool = False
 
@@ -184,6 +185,7 @@ class Config:
             ),
             navigate_tool=env.get("SENTRY_MCP_NAVIGATE_TOOL") or defaults.navigate_tool,
             snapshot_tool=env.get("SENTRY_MCP_SNAPSHOT_TOOL") or defaults.snapshot_tool,
+            evaluate_tool=env.get("SENTRY_MCP_EVALUATE_TOOL") or defaults.evaluate_tool,
             expose_upstream_tools=expose in {"1", "true", "yes", "on"},
             token=(env.get("SENTRY_MCP_TOKEN") or "").strip() or None,
         )
@@ -240,16 +242,15 @@ async def handle_health(request: web.Request) -> web.Response:
                 "configured": bool(getattr(judge, "available", False)),
             },
             "scanning": True,
-            "tiers_implemented": [1],
+            "tiers_implemented": [1, 2],
             "tiers_missing": {
-                "2": "boilerplate removal (spec section 5.4)",
                 "3": "rendered page image (spec section 5.5)",
             },
             "upstream_tools_exposed": cfg.expose_upstream_tools,
             # Report the configured names rather than a verification boolean the
             # running process cannot substantiate. Confirmation is a deployment
             # step: scripts/verify_upstream.py, which exits non-zero on a miss.
-            "upstream_tools": [cfg.navigate_tool, cfg.snapshot_tool],
+            "upstream_tools": [cfg.navigate_tool, cfg.snapshot_tool, cfg.evaluate_tool],
             "never_exposed": sorted(NEVER_EXPOSE),
             # Whether, not what. An operator needs to know the door is locked;
             # nobody needs the key echoed back by an unauthenticated endpoint.
@@ -461,6 +462,7 @@ async def _handle_tools_call(request: web.Request, envelope: dict) -> web.Respon
             (params.get("arguments") or {}).get("url"),
             navigate_tool=cfg.navigate_tool,
             snapshot_tool=cfg.snapshot_tool,
+            evaluate_tool=cfg.evaluate_tool,
             thresholds=request.app[KEY_THRESHOLDS],
         )
     except JudgeUnavailable as exc:

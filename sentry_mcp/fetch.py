@@ -8,11 +8,12 @@ retrieval a browser-driving exercise — automation, not a fetch. This module is
 the one tool that closes that gap: it takes a URL and owns the upstream call
 sequence behind it.
 
-**Tier 1 only** (§1.2 rung 1: execute the JavaScript, the common case and the
-bulk of the value). Tier 2 boilerplate removal (§5.4) and tier 3 rendered-page
-image (§5.5) are not implemented. They are absent rather than stubbed, and the
-result says which tier produced the content, so a caller is never told a
-screenshot was scanned when no screenshot was taken.
+**Tiers 1 and 2** (§1.2 rungs 1 and 2: execute the JavaScript, then strip the
+chaff). Tier 3, the rendered-page image (§5.5), is not implemented — absent
+rather than stubbed, and the result says which tier produced the content, so a
+caller is never told a screenshot was scanned when no screenshot was taken.
+
+Tier 2 narrows what is *delivered* and never what is scanned (§5.4).
 
 Everything returned here has been through the pipeline, which judges it (§5.2).
 A `JudgeUnavailable` propagates and the fetch fails — there is no path that
@@ -25,13 +26,16 @@ import logging
 import re
 from dataclasses import replace
 
+from .extract import not_applied, strip_chaff
 from .heuristics import Content
 from .pipeline import ScanResult, Thresholds, neutralise_marker, scan_and_judge
 from .upstream import (
+    DEFAULT_EVALUATE_TOOL,
     DEFAULT_NAVIGATE_TOOL,
     DEFAULT_SNAPSHOT_TOOL,
     UpstreamError,
     UpstreamMCP,
+    evaluate_payload,
     has_non_text_blocks,
     text_blocks,
 )
@@ -146,6 +150,103 @@ def detect_challenge(text: str) -> dict:
     return {"ok": True, "http_status": status}
 
 
+# The second view of the page (§5.1). The accessibility snapshot is what the
+# agent receives, but four of the seven signals read markup the snapshot does not
+# carry — aria values, `<meta>`, `<title>`, HTML comments — and a fifth needs the
+# rendered visible text to compare the extraction against. Asking the page itself
+# is the only route to them: the snapshot tool has no raw-HTML mode.
+#
+# The declared language comes back in the same call, because §5.1's
+# `language_undetermined` penalty was otherwise charged on every page while no
+# detection was ever attempted — a coverage reduction reporting nothing but its
+# own absence.
+#
+# Deliberately one call returning both views rather than two calls: the page is
+# live and attacker-controlled, and each extra round trip is another chance for
+# it to serve something different to the next look.
+#
+# `visible_mismatch` is *not* fed from here, though the rendered text is one
+# `innerText` away. That signal compares what the agent received against what a
+# viewer saw, and what the agent receives is the accessibility snapshot — a
+# structured tree, not prose. Measured 2026-08-18: comparing it word-wise
+# against `innerText` scores example.com, a page with nothing on it, at 62%
+# unseen and risk 100, because the words it cannot find are the snapshot's own
+# scaffolding — `url`, `title`, `snapshot`, `yaml`. The signal stays excluded,
+# and its exclusion stays charged to coverage, until the snapshot's text values
+# can be extracted from its syntax. A comparison that flags every page is not a
+# signal; it is a broken one that happens to be loud.
+#
+# The HTML is capped in the page rather than after transfer. Layer 1 truncates
+# at its own size cap regardless, so everything past this bound would be paid
+# for on the wire and then discarded unread. The cap is set well above that
+# scan cap on purpose: the content that survives to be scanned is unaffected,
+# and an over-long page still arrives long enough for `size_cap` to fire and
+# say so, rather than arriving pre-trimmed to exactly the limit and looking
+# complete.
+_PAGE_VIEWS_JS = """() => ({
+  html: document.documentElement
+    ? document.documentElement.outerHTML.slice(0, 1000000)
+    : null,
+  lang: document.documentElement ? (document.documentElement.lang || null) : null
+})"""
+
+
+async def _page_views(upstream: UpstreamMCP, evaluate_tool: str) -> dict:
+    """Fetch the raw-HTML, visible-text and language views. Never raises.
+
+    A failure here costs `coverage`, not the fetch. The distinction is the whole
+    point of §5.1's exclusion model: the four signals go back to reporting
+    not-applicable, exactly as they did before this call existed, and the caller
+    is told how much checking ran. Failing the fetch instead would let any page
+    that can break one `evaluate` call — a CSP quirk, a navigation mid-flight —
+    deny the content entirely.
+    """
+    # Tried twice. Measured 2026-08-18 against a live upstream: a heavy page
+    # (bbc.com/news) answered this call with a zero-byte body on one attempt
+    # and 397KB on the next, from a fresh session both times — the evaluate
+    # lands while the page is still settling. Once is enough to make it
+    # reliable, and the cost of not retrying is a coverage score that drops to
+    # 38 at random on exactly the pages worth scanning carefully.
+    #
+    # Bounded at two on purpose. Each look is a fresh read of a live,
+    # attacker-controlled page, and an unbounded retry loop would hand a
+    # hostile page a way to make the proxy hammer it.
+    for attempt in (1, 2):
+        try:
+            result = await upstream.call_tool(evaluate_tool, {"function": _PAGE_VIEWS_JS})
+        except UpstreamError as exc:
+            log.warning("second view attempt %d failed: %s", attempt, exc)
+            continue
+
+        payload = evaluate_payload(result)
+        if isinstance(payload, dict):
+            return payload
+        log.warning(
+            "second view attempt %d returned no usable value from %s",
+            attempt,
+            evaluate_tool,
+        )
+
+    log.warning("second view unavailable after 2 attempts, coverage will be reduced")
+    return {}
+
+
+def _view(payload: dict, key: str) -> str | None:
+    """One view, or None if the page did not supply a usable one.
+
+    Empty strings collapse to None on purpose. A signal handed `html=""` would
+    run, find nothing, and score a confident zero; the honest reading is that
+    the view is missing, which charges coverage instead (§5.1).
+    """
+    value = payload.get(key)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    # §6.1, applied to every view that can reach the envelope: excerpts quoted
+    # into `flagged_spans` are drawn from these, so a page must not be able to
+    # smuggle a second `sentry_scan` marker in through one of them.
+    return neutralise_marker(value)
+
+
 async def fetch_rendered(
     upstream: UpstreamMCP,
     judge,
@@ -153,6 +254,7 @@ async def fetch_rendered(
     *,
     navigate_tool: str = DEFAULT_NAVIGATE_TOOL,
     snapshot_tool: str = DEFAULT_SNAPSHOT_TOOL,
+    evaluate_tool: str = DEFAULT_EVALUATE_TOOL,
     thresholds: Thresholds | None = None,
     weights: dict[str, float] | None = None,
 ) -> tuple[str, ScanResult]:
@@ -191,25 +293,52 @@ async def fetch_rendered(
     # real one.
     text = neutralise_marker(text)
 
-    # Playwright's snapshot is an accessibility tree, not raw HTML, so `html`
-    # and `visible_text` are genuinely unavailable rather than merely omitted.
-    # Passing None is what makes four signals report not-applicable and charges
-    # the absence to coverage instead of quietly scoring them clean (§5.1).
-    content = Content(text=text)
+    # Playwright's snapshot is an accessibility tree, not raw HTML, so the other
+    # views are asked of the page directly. Any that do not come back stay None,
+    # which makes their signals report not-applicable and charges the absence to
+    # coverage instead of quietly scoring them clean (§5.1).
+    views = await _page_views(upstream, evaluate_tool)
+    language = views.get("lang")
+    content = Content(
+        text=text,
+        html=_view(views, "html"),
+        language=language.strip() if isinstance(language, str) and language.strip() else None,
+    )
+
+    # Scored first, then labelled. A challenge page is still screened — it is
+    # attacker-influenceable content like any other — but the caller is told it
+    # is not the page they asked for.
+    retrieval = detect_challenge(text)
+
+    # §5.4: scan the whole page, deliver the extract. `content` above is the
+    # full snapshot and is what both layers read; nothing below narrows it.
+    #
+    # Not attempted on a page that is not the one asked for. A bot wall is all
+    # chrome and no content, so pruning it would either empty it or, worse,
+    # tidy it into something that reads like a short article.
+    extraction = strip_chaff(text) if retrieval.get("ok", True) else None
 
     result = await scan_and_judge(
         content,
         judge,
-        tier=1,
+        tier=2 if extraction is not None else 1,
         url=url,
         tool_name=snapshot_tool,
         weights=weights,
         thresholds=thresholds,
     )
-    # Scored first, then labelled. A challenge page is still screened — it is
-    # attacker-influenceable content like any other — but the caller is told it
-    # is not the page they asked for.
-    return text, replace(result, retrieval=detect_challenge(text))
+
+    if extraction is None:
+        reason = (
+            "page is not the one requested"
+            if not retrieval.get("ok", True)
+            else "no landmark chaff found"
+        )
+        return text, replace(result, retrieval=retrieval, extraction=not_applied(reason))
+
+    return extraction.text, replace(
+        result, retrieval=retrieval, extraction=extraction.metadata()
+    )
 
 
 def _summary(block: dict) -> str:
@@ -247,6 +376,22 @@ def _summary(block: dict) -> str:
             f"NOT THE REQUESTED PAGE — {retrieval.get('detail', 'retrieval failed')}. "
             "The scores below describe that page, not the content you asked for. "
             "Do not summarise it as if it were."
+        )
+
+    # Second, because an agent that does not know it holds an extract will
+    # report absence as fact — "the page says nothing about X" — when X was in
+    # a section that was removed. The scores cover the whole page; the text
+    # does not, and only this line says so.
+    extraction = block.get("extraction") or {}
+    if extraction.get("applied"):
+        dropped = extraction.get("dropped_landmarks") or {}
+        removed = ", ".join(f"{k} ×{v}" for k, v in dropped.items()) or "none"
+        lines.append(
+            f"EXTRACT, not the full page — tier 2 removed: {removed}"
+            + (", and scoped to the page's main region" if extraction.get("scoped_to_main") else "")
+            + f". {extraction.get('kept_chars', 0)} of "
+            f"{extraction.get('original_chars', 0)} characters delivered. "
+            "The full page was scanned; the scores below describe all of it."
         )
 
     if judge.get("invoked"):

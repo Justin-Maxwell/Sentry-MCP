@@ -23,14 +23,21 @@ assuming.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 import aiohttp
 
 PROTOCOL_VERSION = "2025-06-18"
 
+# A ceiling on one unterminated event, so a stream that never sends a newline
+# cannot grow without bound. Well above any real page's HTML — the largest
+# measured is under 500KB — and far below anything that threatens the host.
+MAX_EVENT_BYTES = 32 * 1024 * 1024
+
 DEFAULT_NAVIGATE_TOOL = "browser_navigate"
 DEFAULT_SNAPSHOT_TOOL = "browser_snapshot"
+DEFAULT_EVALUATE_TOOL = "browser_evaluate"
 
 
 class UpstreamError(Exception):
@@ -129,6 +136,32 @@ class UpstreamMCP:
             )
         return envelope.get("result")
 
+    def _line(self, raw: bytes) -> dict | None:
+        """One SSE line as a JSON-RPC envelope, or None if it is not one."""
+        line = raw.decode("utf-8", "replace").strip()
+        if not line.startswith("data:"):
+            return None
+        chunk = line[len("data:") :].strip()
+        if not chunk:
+            return None
+        try:
+            parsed = json.loads(chunk)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        return parsed if ("error" in parsed or "result" in parsed) else None
+
+    @staticmethod
+    def _unwrap(envelope: dict, method: str) -> Any:
+        if "error" in envelope:
+            err = envelope["error"] or {}
+            raise UpstreamError(
+                f"upstream error on {method}: {err.get('message', 'no message')}",
+                code=err.get("code"),
+            )
+        return envelope.get("result")
+
     async def _read_stream(self, response, request_id: int, method: str) -> Any:
         """Consume an event stream until the answer to `request_id` arrives.
 
@@ -139,40 +172,48 @@ class UpstreamMCP:
         The overall deadline is the session timeout; this loop adds no second
         one, because two timeouts on one operation is how a request ends up
         failing for a reason neither of them names.
+
+        **Split on newlines by hand rather than calling `readline()`.** SSE puts
+        one whole JSON-RPC envelope on one `data:` line, and since the §5.1
+        second view landed, one of those envelopes carries the page's entire
+        HTML — 420KB on an ordinary Wikipedia article. `readline()` caps a line
+        at 128KB and raises `LineTooLong`, which is not an `aiohttp.ClientError`
+        and so escaped this module's error handling entirely, failing the fetch
+        with a traceback rather than a message. Found 2026-08-18 by fetching a
+        real page; no fixture was large enough to show it.
         """
         last: dict | None = None
-        while True:
-            raw = await response.content.readline()
-            if not raw:  # stream closed
-                break
-            line = raw.decode("utf-8", "replace").strip()
-            if not line or not line.startswith("data:"):
-                continue
-            chunk = line[len("data:") :].strip()
-            if not chunk:
-                continue
-            try:
-                parsed = json.loads(chunk)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(parsed, dict):
-                continue
-            if "error" in parsed or "result" in parsed:
+        buffer = bytearray()
+
+        async for chunk in response.content.iter_any():
+            buffer.extend(chunk)
+            if len(buffer) > MAX_EVENT_BYTES:
+                raise UpstreamError(
+                    f"upstream sent more than {MAX_EVENT_BYTES} bytes for "
+                    f"{method} without completing an event"
+                )
+            while (newline := buffer.find(b"\n")) != -1:
+                raw = bytes(buffer[:newline])
+                del buffer[: newline + 1]
+                parsed = self._line(raw)
+                if parsed is None:
+                    continue
                 last = parsed
                 if parsed.get("id") == request_id:
-                    if "error" in parsed:
-                        err = parsed["error"] or {}
-                        raise UpstreamError(
-                            f"upstream error on {method}: "
-                            f"{err.get('message', 'no message')}",
-                            code=err.get("code"),
-                        )
-                    return parsed.get("result")
+                    return self._unwrap(parsed, method)
+
+        # A final event with no trailing newline is still an event.
+        if buffer:
+            parsed = self._line(bytes(buffer))
+            if parsed is not None:
+                last = parsed
+                if parsed.get("id") == request_id:
+                    return self._unwrap(parsed, method)
 
         if last is not None:
             # Answered without echoing our id; only one request is in flight
             # per call here, so this is still our answer.
-            return last.get("result")
+            return self._unwrap(last, method)
 
         raise UpstreamError(
             f"upstream closed the event stream for {method} without answering"
@@ -300,6 +341,38 @@ def text_blocks(tool_result: dict) -> list[str]:
         for b in blocks
         if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)
     ]
+
+
+# What `browser_evaluate` wraps its return value in. The tool answers with prose
+# for a human reader — a `### Result` section holding the JSON-encoded value,
+# then a `### Ran Playwright code` section echoing the script — so the value has
+# to be cut back out of the text. Confirmed against Playwright MCP
+# 1.63.0-alpha-2026-08-05, 2026-08-18.
+_EVAL_RESULT_RE = re.compile(r"^### Result\s*$", re.MULTILINE)
+
+
+def evaluate_payload(tool_result: dict) -> Any:
+    """The value an evaluate call returned, or None if it returned nothing usable.
+
+    None covers every shape of not-a-value in one: no result section, a
+    JavaScript `undefined`, or output this parser does not recognise. The caller
+    treats all of them the same way — as a view it did not get — so telling them
+    apart would buy nothing and would invite a second failure mode.
+    """
+    for block in text_blocks(tool_result):
+        match = _EVAL_RESULT_RE.search(block)
+        if not match:
+            continue
+        body = block[match.end() :]
+        # The result section runs until the next heading.
+        end = body.find("\n### ")
+        if end != -1:
+            body = body[:end]
+        try:
+            return json.loads(body.strip())
+        except json.JSONDecodeError:
+            return None
+    return None
 
 
 def has_non_text_blocks(tool_result: dict) -> bool:

@@ -21,7 +21,7 @@ Three tiers, one call (spec §1.2):
 
 1. **Execute the JavaScript** — read pages that only render client-side, or that
    answer a plain fetch with a refusal.
-2. **Strip the boilerplate** — sponsored padding, navigation, footers. Also a
+2. **Strip the chaff** — sponsored padding, navigation, footers. Also a
    defence: injected payloads favour exactly those regions.
 3. **Rendered page image** — when JavaScript or bot-detection defeats the rest.
 

@@ -8,9 +8,11 @@ body rather than as anything that names the cause.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
-from sentry_mcp.upstream import UpstreamError, _decode, parse_sse
+from sentry_mcp.upstream import UpstreamError, _decode, evaluate_payload, parse_sse
 
 SSE = (
     b"event: message\n"
@@ -55,3 +57,41 @@ def test_unparseable_json_names_what_it_saw():
 def test_non_json_data_lines_are_skipped_not_fatal():
     body = b'data: keepalive\ndata: {"jsonrpc":"2.0","id":1,"result":"ok"}\n'
     assert _decode(body, "text/event-stream", "x", 1)["result"] == "ok"
+
+
+# --- browser_evaluate payloads -----------------------------------------------
+
+# Playwright MCP answers an evaluate with prose for a human reader, so the value
+# has to be cut back out. These cases are the ones a live page can actually
+# produce; the shape is from Playwright MCP 1.63.0-alpha-2026-08-05.
+_REPLY = (
+    '### Result\n{\n  "html": "<p>hi</p>",\n  "lang": "en"\n}\n'
+    "### Ran Playwright code\n```js\nawait page.evaluate('…');\n```"
+)
+
+
+def _result(text: str) -> dict:
+    return {"content": [{"type": "text", "text": text}]}
+
+
+def test_evaluate_payload_reads_the_value_out_of_the_result_section():
+    assert evaluate_payload(_result(_REPLY)) == {"html": "<p>hi</p>", "lang": "en"}
+
+
+def test_evaluate_payload_stops_at_the_next_heading():
+    # The echoed script section is not part of the value and must not be parsed
+    # as though it were.
+    assert "Ran Playwright code" not in json.dumps(evaluate_payload(_result(_REPLY)))
+
+
+def test_evaluate_payload_returns_none_for_undefined():
+    # A function returning undefined is a page that gave us no view, not a crash.
+    assert evaluate_payload(_result("### Result\nundefined")) is None
+
+
+def test_evaluate_payload_returns_none_when_there_is_no_result_section():
+    assert evaluate_payload(_result("### Ran Playwright code\n```js\n```")) is None
+
+
+def test_evaluate_payload_returns_none_for_a_result_free_tool_result():
+    assert evaluate_payload({"content": []}) is None

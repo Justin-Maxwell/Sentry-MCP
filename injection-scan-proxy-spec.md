@@ -19,7 +19,7 @@ generalises to most of the sites this exists for.
 ### 1.2 The capability ladder
 
 1. **Execute the JavaScript.** The common case and the bulk of the value.
-2. **Strip the boilerplate.** Sponsored padding, navigation, footers.
+2. **Strip the chaff.** Sponsored padding, navigation, footers.
    Also a defence — see §5.4.
 3. **Rendered page image.** Fires when complex JavaScript or bot-detection
    defeats everything above. Required, not optional.
@@ -216,7 +216,21 @@ the weighted sum makes the page *look safer* — a page where four of seven
 signals could not run scores identically to one where all seven ran clean.
 Every exclusion therefore reduces `coverage` (§5.3). Coverage drops when:
 
-- Only the accessibility snapshot is available, with no raw HTML.
+- Only the accessibility snapshot is available, with no raw HTML. As of
+  2026-08-18 the fetcher asks the page for a second view via
+  `browser_evaluate` — raw HTML and the declared language in one call — so
+  this is now the *degraded* case rather than the normal one. The evaluate
+  call failing costs coverage and never the fetch: the signals return to
+  reporting not applicable, exactly as before the second view existed.
+- The rendered visible text is *deliberately not* taken from that call, so
+  visible-vs-extracted mismatch stays excluded. What the agent receives is
+  the accessibility snapshot, which is a structured tree rather than prose;
+  measured 2026-08-18, word-comparing it against `innerText` scores
+  example.com — a page with nothing on it — at 62% unseen and risk 100,
+  because the words it cannot find are the snapshot's own scaffolding
+  (`url`, `title`, `snapshot`, `yaml`). Reviving this signal requires
+  extracting the snapshot's text values from its syntax first. Until then
+  its exclusion is real and coverage says so.
 - The content is predominantly image.
 - The scan was truncated by the size cap below.
 - The text is not English (§8's known-gap limitation becomes a *visible*
@@ -263,6 +277,12 @@ the metadata — never an unbounded scan and never a silent pass.
     someone adds `browser_evaluate` to recover a raw-HTML view, coverage rises,
     that cell becomes reachable, and pages silently stop being judged. An
     improvement to the scanner would have disabled the scanner.
+
+    That day came on 2026-08-18: the second view landed and coverage now
+    reaches 100 on an ordinary page. Nothing broke, because the cell had
+    already been deleted — which is the whole argument for deleting a rule
+    that is only correct by accident, rather than leaving it to be discovered
+    by the improvement that arms it.
 
   `risk` and `coverage` are both retained and both reported in §6. `coverage`
   still records what could not be checked. Neither gates the judge.
@@ -367,7 +387,7 @@ written.
   they hold the signal breakdown and the same truncated excerpts as §6 —
   not whole pages.
 
-### 5.4 Boilerplate removal (tier 2)
+### 5.4 Chaff removal (tier 2)
 
 Stripping sponsored padding, navigation and footers is a usability feature
 (§1.2 tier 2) that doubles as a defence: injected payloads favour exactly
@@ -380,8 +400,37 @@ chrome delivered means less surface to scan and fewer tokens spent.
   filtering — no element hiding — so this removes requests, not layout.
 - **Main-content extraction:** no upstream support exists.
   `--snapshot-mode` is `full` or `none`, with nothing between. Extraction
-  must therefore happen in the proxy, and Readability does not drop in
-  because the accessibility snapshot is not HTML.
+  therefore happens in the proxy. **Built 2026-08-18**, in `extract.py`, by
+  pruning the accessibility snapshot's own ARIA landmarks: scope to `main`
+  where the page declares one, and drop `banner`, `contentinfo`,
+  `navigation`, `complementary` and `search` wherever they sit — including
+  inside `main`, which routinely carries its own page-tools nav. `region` is
+  deliberately kept: it is a generic labelled section and on the pages
+  measured it holds the article's own subsections.
+
+  **The snapshot rather than the raw HTML, though the HTML is now
+  available.** Readability-style extraction would give better prose, and the
+  §5.1 second view could feed it. It is still the wrong input, for a
+  structural reason rather than an aesthetic one: the agent receives the
+  snapshot, so an HTML-derived extract would be text in a form that was never
+  scanned *in that form*. Pruning the snapshot yields a strict subset of what
+  both layers already read, and a subset needs no second verdict. The
+  landmarks are also the page's own declaration about itself, which is why
+  this is not guesswork — a site that labels its footer `contentinfo` has
+  told us it is a footer.
+
+  Measured the day it was built: Wikipedia 79,609 → 63,517 characters,
+  dropping one banner, seven navigations, one search, one complementary and
+  one contentinfo; BBC News 45,063 → 33,519. Hacker News, which is built from
+  tables and declares no landmarks at all, correctly stays at tier 1 rather
+  than inventing an extraction.
+
+  Two refusals are part of the design. An extract pruned below a floor is
+  discarded and the full page delivered, because a page pruned to a remnant
+  is a failure of the pruner rather than a page with nothing on it. And a
+  page that failed `retrieval` — a bot wall — is never extracted at all: it
+  is all chrome and no content, so pruning would either empty it or tidy it
+  into something that reads like a short article.
 - **Interaction with §8:** extraction *is* rewriting, which §8 otherwise
   forbids. The carve-out: **scan the full page, deliver the extracted
   version, and let the verdict cover both.** Never scan only the extract —
@@ -570,7 +619,7 @@ from a forged one:
   labels, it does not "clean" the page text. Rewriting risks silently
   destroying legitimate content and creating a false sense of safety.
   Three narrow exceptions: the defanging in §6, the marker-stripping in
-  §6.1, and boilerplate extraction under §5.4 — which is permitted only
+  §6.1, and chaff extraction under §5.4 — which is permitted only
   because the full page is scanned regardless of what is delivered.
 
 ## 9. Extensibility requirement
